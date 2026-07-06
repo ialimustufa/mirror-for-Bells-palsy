@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Home, Sparkles, BookOpen, TrendingUp, Play, X, ChevronLeft, ChevronRight, Eye, Flame, Check, Heart, Info, ArrowRight, Loader2, Volume2, VolumeX, Zap, AlertCircle, CameraOff, Share2, Trash2, Save, RotateCcw, Plus, Minus, Download, Upload } from "lucide-react";
+import { Home, Sparkles, BookOpen, TrendingUp, Play, X, ChevronLeft, ChevronRight, Eye, Flame, Check, Heart, Info, ArrowRight, Loader2, Volume2, VolumeX, Zap, AlertCircle, CameraOff, Share2, Trash2, Save, RotateCcw, Plus, Minus, Download, Upload, Settings } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import { DAY_END_HOUR, DAY_START_HOUR, INTERSTITIAL_SEC, MAX_EXERCISE_REPEATS, MAX_EXERCISE_REPS, MIN_EXERCISE_REPS, PROFILE_HOLD_SEC, PROFILE_REST_SEC } from "../domain/config";
 import { STANDARD_ASSESSMENT_EXERCISE_IDS, STANDARD_ASSESSMENT_REPS, STANDARD_ASSESSMENT_REST_SEC, summarizeAssessmentSession } from "../domain/assessment";
@@ -21,6 +21,7 @@ const NAV_ITEMS = [
   { key: "baseline", label: "Baseline", icon: Zap },
   { key: "journal", label: "Journal", icon: BookOpen },
   { key: "progress", label: "Progress", icon: TrendingUp },
+  { key: "preferences", label: "Preferences", shortLabel: "Prefs", icon: Settings },
 ];
 
 const EMPTY_COUNTS = Object.freeze({});
@@ -37,8 +38,13 @@ const SCORING_NOISE_MODE_DESCRIPTIONS = {
   raw: "No noise subtraction; minimum gates only.",
 };
 
+const PAST_SESSIONS_PAGE_SIZE = 5;
+const PAST_ASSESSMENTS_PAGE_SIZE = 5;
+const PAST_JOURNAL_PAGE_SIZE = 5;
+const DEFAULT_OPEN_REGION_KEYS = REGIONS.filter((region) => region.key !== "all").map((region) => region.key);
+
 function Header({ view, streak }) {
-  const titles = { home: "Today", practice: "Practice", baseline: "Baseline", journal: "Journal", progress: "Progress" };
+  const titles = { home: "Today", practice: "Practice", baseline: "Baseline", journal: "Journal", progress: "Progress", preferences: "Preferences" };
   return (
     <header className="flex items-center justify-between lg:hidden">
       <div className="flex items-center gap-2">
@@ -92,6 +98,16 @@ function sameExerciseSet(a = [], b = []) {
   if (a.length !== b.length) return false;
   const bSet = new Set(b);
   return a.every((id) => bSet.has(id));
+}
+
+function exerciseRegionGroups(items = [], getRegion = (item) => item?.region) {
+  return REGIONS
+    .filter((region) => region.key !== "all")
+    .map((region) => ({
+      ...region,
+      items: items.filter((item) => getRegion(item) === region.key),
+    }))
+    .filter((region) => region.items.length > 0);
 }
 
 function progressSummaryLabel(progress) {
@@ -239,6 +255,7 @@ function ConfirmResetButton({ onConfirm, label, confirmTitle = "Reset to recomme
 function BaselineManagerPanel({ profile, onRedo, onReset }) {
   const [selectedIds, setSelectedIds] = useState([]);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+  const [openRegions, setOpenRegions] = useState(() => new Set(DEFAULT_OPEN_REGION_KEYS));
   const items = PROFILE_ASSESSMENT_EXERCISES
     .map((exerciseId) => ({
       exerciseId,
@@ -246,6 +263,7 @@ function BaselineManagerPanel({ profile, onRedo, onReset }) {
       profileExercise: profile?.exercises?.[exerciseId] ?? null,
     }))
     .filter((item) => item.exercise);
+  const regionGroups = exerciseRegionGroups(items, (item) => item.exercise.region);
   const selectedExistingIds = selectedIds.filter((id) => profile?.exercises?.[id]);
   const selectedMissingIds = selectedIds.filter((id) => !profile?.exercises?.[id]);
   const redoLabel = selectedIds.length > 0 && selectedMissingIds.length === selectedIds.length
@@ -257,6 +275,14 @@ function BaselineManagerPanel({ profile, onRedo, onReset }) {
     setSelectedIds((current) => current.includes(exerciseId)
       ? current.filter((id) => id !== exerciseId)
       : [...current, exerciseId]);
+  };
+  const toggleRegion = (regionKey) => {
+    setOpenRegions((current) => {
+      const next = new Set(current);
+      if (next.has(regionKey)) next.delete(regionKey);
+      else next.add(regionKey);
+      return next;
+    });
   };
   const resetSelected = () => {
     onReset?.(selectedExistingIds);
@@ -276,28 +302,49 @@ function BaselineManagerPanel({ profile, onRedo, onReset }) {
           <button onClick={() => setSelectedIds([])} className="rounded-full px-2.5 py-1 text-[11px] font-semibold" style={{ background: "rgba(244,239,230,0.06)", color: "#F4EFE6", border: "1px solid rgba(244,239,230,0.12)" }}>Clear</button>
         </div>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
-        {items.map(({ exerciseId, exercise, profileExercise }) => {
-          const selected = selectedIds.includes(exerciseId);
-          const quality = profileExercise?.quality;
-          const pct = displayPct(profileExercise?.initialSymmetry);
-          return (
-            <button key={exerciseId} onClick={() => toggleSelected(exerciseId)} aria-pressed={selected} className="text-left rounded-xl px-3 py-2.5 flex items-center gap-2" style={{ background: selected ? "rgba(184,84,58,0.24)" : "rgba(244,239,230,0.06)", border: selected ? "1px solid rgba(255,180,143,0.45)" : "1px solid rgba(244,239,230,0.08)", color: "#F4EFE6" }}>
-              <div className="w-5 h-5 rounded-full flex items-center justify-center shrink-0" style={{ background: selected ? "#B8543A" : "rgba(244,239,230,0.08)", border: selected ? "none" : "1px solid rgba(244,239,230,0.16)" }}>
-                {selected && <Check className="w-3 h-3" />}
+      <div className="max-h-72 overflow-y-auto pr-1 space-y-4">
+        {regionGroups.map((group) => (
+          <div key={group.key}>
+            <button
+              type="button"
+              onClick={() => toggleRegion(group.key)}
+              aria-expanded={openRegions.has(group.key)}
+              className="w-full flex items-center justify-between gap-3 mb-2 rounded-lg px-2 py-1.5 text-left"
+              style={{ background: "rgba(244,239,230,0.04)", color: "#F4EFE6" }}
+            >
+              <div className="inline-flex items-center gap-1.5 min-w-0">
+                <ChevronRight className="w-3.5 h-3.5 shrink-0 transition-transform" style={{ transform: openRegions.has(group.key) ? "rotate(90deg)" : "rotate(0deg)" }} />
+                <span className="text-[10px] uppercase tracking-wider opacity-65 truncate">{group.label}</span>
               </div>
-              <ExerciseGlyph exercise={exercise} size="xs" tone="dark" />
-              <div className="min-w-0 flex-1">
-                <div className="text-xs font-semibold truncate">{exercise.name}</div>
-                <div className="text-[10px] opacity-60 truncate">
-                  {profileExercise
-                    ? `${pct == null ? "Baseline saved" : `${pct}% baseline`}${quality?.label ? ` · ${quality.label}` : ""}`
-                    : "Needs baseline"}
-                </div>
-              </div>
+              <div className="text-[10px] tabular-nums opacity-45 shrink-0">{group.items.filter((item) => item.profileExercise).length}/{group.items.length}</div>
             </button>
-          );
-        })}
+            {openRegions.has(group.key) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {group.items.map(({ exerciseId, exercise, profileExercise }) => {
+                  const selected = selectedIds.includes(exerciseId);
+                  const quality = profileExercise?.quality;
+                  const pct = displayPct(profileExercise?.initialSymmetry);
+                  return (
+                    <button key={exerciseId} onClick={() => toggleSelected(exerciseId)} aria-pressed={selected} className="text-left rounded-xl px-3 py-2.5 flex items-center gap-2" style={{ background: selected ? "rgba(184,84,58,0.24)" : "rgba(244,239,230,0.06)", border: selected ? "1px solid rgba(255,180,143,0.45)" : "1px solid rgba(244,239,230,0.08)", color: "#F4EFE6" }}>
+                      <div className="w-5 h-5 rounded-full flex items-center justify-center shrink-0" style={{ background: selected ? "#B8543A" : "rgba(244,239,230,0.08)", border: selected ? "none" : "1px solid rgba(244,239,230,0.16)" }}>
+                        {selected && <Check className="w-3 h-3" />}
+                      </div>
+                      <ExerciseGlyph exercise={exercise} size="xs" tone="dark" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-semibold truncate">{exercise.name}</div>
+                        <div className="text-[10px] opacity-60 truncate">
+                          {profileExercise
+                            ? `${pct == null ? "Baseline saved" : `${pct}% baseline`}${quality?.label ? ` · ${quality.label}` : ""}`
+                            : "Needs baseline"}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
       <div className="flex flex-wrap gap-2 mt-3">
         <button disabled={!selectedIds.length} onClick={() => onRedo?.(selectedIds)} className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold disabled:opacity-40" style={{ background: "#B8543A", color: "#F4EFE6" }}>
@@ -1785,9 +1832,9 @@ function ClinicalScaleEstimatePanel({ clinicalScales }) {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           {cards.map((card) => (
             <div key={card.key} className="rounded-xl p-3" style={{ background: "rgba(244,239,230,0.06)", border: "1px solid rgba(244,239,230,0.08)" }}>
-              <div className="flex items-start justify-between gap-2 mb-1">
-                <div className="text-[10px] uppercase tracking-wider opacity-50">{card.label}</div>
-                <div className="text-[9px] uppercase tracking-wider opacity-50">{card.statusLabel}</div>
+              <div className="mb-2 min-w-0">
+                <div className="text-[10px] uppercase tracking-wider opacity-50 leading-snug" style={{ overflowWrap: "anywhere", hyphens: "auto" }}>{card.label}</div>
+                <div className="text-[9px] uppercase tracking-wider opacity-50 leading-snug mt-1" style={{ overflowWrap: "anywhere", hyphens: "auto" }}>{card.statusLabel}</div>
               </div>
               <div className="text-xl tabular-nums" style={{ fontFamily: "Fraunces", fontWeight: 600 }}>{card.value}</div>
               <div className="text-[11px] opacity-62 mt-1 leading-snug">{card.sublabel}</div>
@@ -2048,13 +2095,54 @@ function PastSessionRow({ session, onOpen, onDelete }) {
 }
 
 function PastSessionsList({ sessions, onOpen, onDelete }) {
-  const sorted = [...sessions].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 30);
+  const [page, setPage] = useState(0);
+  const sorted = useMemo(() => [...sessions].sort((a, b) => (b.ts || 0) - (a.ts || 0)), [sessions]);
+  const pageCount = Math.ceil(sorted.length / PAST_SESSIONS_PAGE_SIZE);
+  const lastPage = Math.max(0, pageCount - 1);
+  const currentPage = Math.min(page, lastPage);
+  const start = currentPage * PAST_SESSIONS_PAGE_SIZE;
+  const visible = sorted.slice(start, start + PAST_SESSIONS_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, Math.max(0, pageCount - 1)));
+  }, [pageCount]);
+
   if (sorted.length === 0) return null;
   return (
     <div className="rounded-2xl p-5" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
-      <div className="text-sm font-semibold mb-3">Past sessions</div>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-semibold">Past sessions</div>
+          {pageCount > 1 && (
+            <div className="text-xs text-stone-500 tabular-nums mt-0.5">{start + 1}-{Math.min(start + PAST_SESSIONS_PAGE_SIZE, sorted.length)} of {sorted.length}</div>
+          )}
+        </div>
+        {pageCount > 1 && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => setPage((value) => Math.max(0, value - 1))}
+              disabled={currentPage === 0}
+              aria-label="Show newer sessions"
+              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+              style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div className="text-xs text-stone-500 tabular-nums px-1.5">{currentPage + 1}/{pageCount}</div>
+            <button
+              onClick={() => setPage((value) => Math.min(lastPage, value + 1))}
+              disabled={currentPage === lastPage}
+              aria-label="Show older sessions"
+              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+              style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+      </div>
       <div className="space-y-1.5">
-        {sorted.map((s) => {
+        {visible.map((s) => {
           const exCount = (s.exercises ?? s.scores ?? []).length;
           return <PastSessionRow key={s.id || s.ts || `${s.date}-${exCount}`} session={s} onOpen={onOpen} onDelete={onDelete} />;
         })}
@@ -2099,13 +2187,54 @@ function PastAssessmentRow({ assessment, sourceSession, onOpen, showClinicalScal
 }
 
 function PastAssessmentsList({ assessments, sessions, onOpen, showClinicalScaleEstimates = true }) {
-  const sorted = [...(assessments ?? [])].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 12);
+  const [page, setPage] = useState(0);
+  const sorted = useMemo(() => [...(assessments ?? [])].sort((a, b) => (b.ts || 0) - (a.ts || 0)), [assessments]);
+  const pageCount = Math.ceil(sorted.length / PAST_ASSESSMENTS_PAGE_SIZE);
+  const lastPage = Math.max(0, pageCount - 1);
+  const currentPage = Math.min(page, lastPage);
+  const start = currentPage * PAST_ASSESSMENTS_PAGE_SIZE;
+  const visible = sorted.slice(start, start + PAST_ASSESSMENTS_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, Math.max(0, pageCount - 1)));
+  }, [pageCount]);
+
   if (!sorted.length) return null;
   return (
     <div className="rounded-2xl p-5" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
-      <div className="text-sm font-semibold mb-3">Past assessments</div>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-semibold">Past assessments</div>
+          {pageCount > 1 && (
+            <div className="text-xs text-stone-500 tabular-nums mt-0.5">{start + 1}-{Math.min(start + PAST_ASSESSMENTS_PAGE_SIZE, sorted.length)} of {sorted.length}</div>
+          )}
+        </div>
+        {pageCount > 1 && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => setPage((value) => Math.max(0, value - 1))}
+              disabled={currentPage === 0}
+              aria-label="Show newer assessments"
+              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+              style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div className="text-xs text-stone-500 tabular-nums px-1.5">{currentPage + 1}/{pageCount}</div>
+            <button
+              onClick={() => setPage((value) => Math.min(lastPage, value + 1))}
+              disabled={currentPage === lastPage}
+              aria-label="Show older assessments"
+              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+              style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+      </div>
       <div className="space-y-1.5">
-        {sorted.map((assessment) => {
+        {visible.map((assessment) => {
           const sourceSession = sourceSessionForAssessment(assessment, sessions);
           return <PastAssessmentRow key={assessment.sourceSessionId ?? assessment.sourceSessionTs ?? assessment.ts} assessment={assessment} sourceSession={sourceSession} onOpen={onOpen} showClinicalScaleEstimates={showClinicalScaleEstimates} />;
         })}
@@ -2154,12 +2283,22 @@ function TimelapseModal({ exercise, startIdx, onClose }) {
 function JournalView({ entries, onSave }) {
   const today = todayISO();
   const todayEntry = entries.find((e) => e.date === today);
+  const [page, setPage] = useState(0);
   const [symmetry, setSymmetry] = useState(todayEntry?.symmetry ?? 5);
   const [mood, setMood] = useState(todayEntry?.mood ?? "okay");
   const [notes, setNotes] = useState(todayEntry?.notes ?? "");
   const [saved, setSaved] = useState(false);
   const handleSave = () => { onSave({ date: today, symmetry, mood, notes, ts: Date.now() }); setSaved(true); setTimeout(() => setSaved(false), 2000); };
   const past = [...entries].filter((e) => e.date !== today).reverse();
+  const pageCount = Math.ceil(past.length / PAST_JOURNAL_PAGE_SIZE);
+  const lastPage = Math.max(0, pageCount - 1);
+  const currentPage = Math.min(page, lastPage);
+  const start = currentPage * PAST_JOURNAL_PAGE_SIZE;
+  const visiblePast = past.slice(start, start + PAST_JOURNAL_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, Math.max(0, pageCount - 1)));
+  }, [pageCount]);
 
   return (
     <div className="space-y-6">
@@ -2193,8 +2332,38 @@ function JournalView({ entries, onSave }) {
       <button onClick={handleSave} className="w-full rounded-full py-3 font-semibold" style={{ background: saved ? "#7A8F73" : "#1F1B16", color: "#F4EFE6" }}>{saved ? "✓ Saved" : todayEntry ? "Update entry" : "Save entry"}</button>
       {past.length > 0 && (
         <div>
-          <div className="text-sm uppercase tracking-wider text-stone-500 mb-3">Past entries</div>
-          <div className="space-y-2">{past.slice(0, 14).map((e) => <PastEntryRow key={e.date} entry={e} />)}</div>
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <div className="text-sm uppercase tracking-wider text-stone-500">Past entries</div>
+              {pageCount > 1 && (
+                <div className="text-xs text-stone-500 tabular-nums mt-0.5">{start + 1}-{Math.min(start + PAST_JOURNAL_PAGE_SIZE, past.length)} of {past.length}</div>
+              )}
+            </div>
+            {pageCount > 1 && (
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={() => setPage((value) => Math.max(0, value - 1))}
+                  disabled={currentPage === 0}
+                  aria-label="Show newer journal entries"
+                  className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+                  style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <div className="text-xs text-stone-500 tabular-nums px-1.5">{currentPage + 1}/{pageCount}</div>
+                <button
+                  onClick={() => setPage((value) => Math.min(lastPage, value + 1))}
+                  disabled={currentPage === lastPage}
+                  aria-label="Show older journal entries"
+                  className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+                  style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="space-y-2">{visiblePast.map((e) => <PastEntryRow key={e.date} entry={e} />)}</div>
         </div>
       )}
     </div>
@@ -2285,7 +2454,9 @@ function PastEntryRow({ entry }) {
 
 function MovementProfileCard({ profile, initialProfile, history, sessions, progressByExercise, onStart, onReset }) {
   const exercises = profileExerciseEntries(profile);
+  const exerciseGroups = exerciseRegionGroups(exercises);
   const [managerOpen, setManagerOpen] = useState(false);
+  const [openRegions, setOpenRegions] = useState(() => new Set(DEFAULT_OPEN_REGION_KEYS));
   const focusItems = getAdaptiveFocusItems(profile, sessions, 3);
   const created = profile?.createdAt ? new Date(profile.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : null;
   const status = profileStatus(profile);
@@ -2312,6 +2483,14 @@ function MovementProfileCard({ profile, initialProfile, history, sessions, progr
       </div>
     );
   }
+  const toggleRegion = (regionKey) => {
+    setOpenRegions((current) => {
+      const next = new Set(current);
+      if (next.has(regionKey)) next.delete(regionKey);
+      else next.add(regionKey);
+      return next;
+    });
+  };
 
   return (
     <div className="rounded-2xl p-5" style={{ background: "rgba(31, 27, 22, 0.92)", color: "#F4EFE6" }}>
@@ -2416,22 +2595,43 @@ function MovementProfileCard({ profile, initialProfile, history, sessions, progr
           </div>
         </div>
       )}
-      <div className="space-y-2 mb-4">
-        {exercises.map((ex) => (
-          <div key={ex.exerciseId} className="flex items-center gap-3 text-xs">
-            <ExerciseGlyph exerciseId={ex.exerciseId} region={ex.region} size="xs" tone="dark" />
-            <div className="flex-1 min-w-0">
-              <div className="font-medium truncate">{ex.name}</div>
-              <div className="opacity-55">
-                limited side: {ex.limitedSide} · reliable {ex.thresholdBands?.reliableMovement ?? ex.activationThreshold ?? "—"} · target {ex.thresholdBands?.baselineTarget ?? "—"}
+      <div className="space-y-4 mb-4">
+        {exerciseGroups.map((group) => (
+          <div key={group.key}>
+            <button
+              type="button"
+              onClick={() => toggleRegion(group.key)}
+              aria-expanded={openRegions.has(group.key)}
+              className="w-full flex items-center justify-between gap-3 mb-2 rounded-lg px-2 py-1.5 text-left"
+              style={{ background: "rgba(244,239,230,0.04)", color: "#F4EFE6" }}
+            >
+              <div className="inline-flex items-center gap-1.5 min-w-0">
+                <ChevronRight className="w-3.5 h-3.5 shrink-0 transition-transform" style={{ transform: openRegions.has(group.key) ? "rotate(90deg)" : "rotate(0deg)" }} />
+                <span className="text-[10px] uppercase tracking-wider opacity-65 truncate">{group.label}</span>
               </div>
-              {ex.quality && <div className="opacity-55">quality: {ex.quality.label}{ex.quality.issues?.length ? ` · ${ex.quality.issues.join(", ")}` : ""}</div>}
-              {progressByExercise?.[ex.exerciseId] && <div className="mt-0.5" style={{ color: "#D4A574" }}>{progressSummaryLabel(progressByExercise[ex.exerciseId])}</div>}
-            </div>
-            {ex.quality?.key === "retake" && (
-              <button onClick={() => onStart([ex.exerciseId])} className="rounded-full px-2.5 py-1 text-[11px] font-semibold shrink-0" style={{ background: "rgba(184,84,58,0.2)", color: "#FFD3C1" }}>Retake</button>
+              <div className="text-[10px] tabular-nums opacity-45 shrink-0">{group.items.length} baseline{group.items.length === 1 ? "" : "s"}</div>
+            </button>
+            {openRegions.has(group.key) && (
+              <div className="space-y-2">
+                {group.items.map((ex) => (
+                  <div key={ex.exerciseId} className="flex items-center gap-3 text-xs">
+                    <ExerciseGlyph exerciseId={ex.exerciseId} region={ex.region} size="xs" tone="dark" />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{ex.name}</div>
+                      <div className="opacity-55">
+                        limited side: {ex.limitedSide} · reliable {ex.thresholdBands?.reliableMovement ?? ex.activationThreshold ?? "—"} · target {ex.thresholdBands?.baselineTarget ?? "—"}
+                      </div>
+                      {ex.quality && <div className="opacity-55">quality: {ex.quality.label}{ex.quality.issues?.length ? ` · ${ex.quality.issues.join(", ")}` : ""}</div>}
+                      {progressByExercise?.[ex.exerciseId] && <div className="mt-0.5" style={{ color: "#D4A574" }}>{progressSummaryLabel(progressByExercise[ex.exerciseId])}</div>}
+                    </div>
+                    {ex.quality?.key === "retake" && (
+                      <button onClick={() => onStart([ex.exerciseId])} className="rounded-full px-2.5 py-1 text-[11px] font-semibold shrink-0" style={{ background: "rgba(184,84,58,0.2)", color: "#FFD3C1" }}>Retake</button>
+                    )}
+                    {ex.initialSymmetry != null && <div className="tabular-nums shrink-0" style={{ color: scoreColor(ex.initialSymmetry) }}>{displayPct(ex.initialSymmetry)}%</div>}
+                  </div>
+                ))}
+              </div>
             )}
-            {ex.initialSymmetry != null && <div className="tabular-nums shrink-0" style={{ color: scoreColor(ex.initialSymmetry) }}>{displayPct(ex.initialSymmetry)}%</div>}
           </div>
         ))}
       </div>
@@ -2486,7 +2686,7 @@ function BaselineView({ data, onStartProfile, onResetBaselines }) {
   );
 }
 
-function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, onSetPref, onOpenReport, onDeleteSession, onExportData, onExportClinicianBundle, onExportValidationDataset, onImportData, storageUsage, onRefreshStorageUsage, onClearAllData }) {
+function ProgressView({ data, streak, prefs, onOpenReport, onDeleteSession }) {
   // Progress charts are projections of journal/session history. Keeping them derived
   // avoids migration work when scoring or display rules change.
   const practiceSessions = useMemo(() => data.sessions.filter((session) => session.kind !== "assessment"), [data.sessions]);
@@ -2700,9 +2900,20 @@ function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, o
           </div>
         </div>
       )}
-      <BrowserDataControls status={dataTransferStatus} onExport={onExportData} onExportClinicianBundle={onExportClinicianBundle} onExportValidationDataset={onExportValidationDataset} onImport={onImportData} usage={storageUsage} onRefreshUsage={onRefreshStorageUsage} onClearAll={onClearAllData} />
+    </div>
+  );
+}
+
+function PreferencesView({ prefs, dataTransferStatus, onTogglePref, onSetPref, onExportData, onExportClinicianBundle, onExportValidationDataset, onImportData, storageUsage, onRefreshStorageUsage, onClearAllData }) {
+  const showClinicalScaleEstimates = prefs.clinicalScaleEstimatesEnabled !== false;
+  return (
+    <div className="space-y-6">
       <div>
-        <div className="text-sm uppercase tracking-wider text-stone-500 mb-3">Preferences</div>
+        <h2 className="text-3xl" style={{ fontFamily: "Fraunces", fontWeight: 500, letterSpacing: "-0.02em" }}>Preferences</h2>
+        <p className="text-sm text-stone-600 mt-1">Adjust routine cadence, scoring behavior, voice prompts, camera use, and local data.</p>
+      </div>
+      <div>
+        <div className="text-sm uppercase tracking-wider text-stone-500 mb-3">Practice settings</div>
         <div className="space-y-2">
           <DailyGoalSelector value={prefs.dailyGoal ?? 3} onChange={(v) => onSetPref("dailyGoal", v)} />
           <ToggleRow label="Personal recovery model" description="Train local trend estimates from your saved sessions" value={prefs.personalModelEnabled !== false} onToggle={() => onTogglePref("personalModelEnabled")} />
@@ -2714,6 +2925,7 @@ function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, o
           <ToggleRow label="Mirror camera" description="Front camera during sessions" value={prefs.mirrorEnabled} onToggle={() => onTogglePref("mirrorEnabled")} />
         </div>
       </div>
+      <BrowserDataControls status={dataTransferStatus} onExport={onExportData} onExportClinicianBundle={onExportClinicianBundle} onExportValidationDataset={onExportValidationDataset} onImport={onImportData} usage={storageUsage} onRefreshUsage={onRefreshStorageUsage} onClearAll={onClearAllData} />
       <div className="rounded-2xl p-4 text-xs text-stone-600 leading-relaxed" style={{ background: "rgba(122, 143, 115, 0.1)" }}>
         Mirror is a practice companion, not medical care. Always work with your neurologist and physical therapist on your specific recovery plan. Discontinue any exercise that causes pain.
       </div>
@@ -2896,7 +3108,7 @@ function BottomNav({ view, setView }) {
           return (
             <button key={item.key} onClick={() => setView(item.key)} className="flex-1 flex flex-col items-center gap-0.5 py-2 rounded-full" style={{ background: active ? "#F4EFE6" : "transparent", color: active ? "#1F1B16" : "rgba(244, 239, 230, 0.65)" }}>
               <Icon className="w-4 h-4" strokeWidth={2.2} />
-              <span className="text-[10px] font-semibold">{item.label}</span>
+              <span className="text-[10px] font-semibold">{item.shortLabel ?? item.label}</span>
             </button>
           );
         })}
@@ -2967,7 +3179,7 @@ const ONBOARDING_STEPS = [
     title: "How many sessions a day?",
     body: "Retraining works best with frequent short sessions spread across the day.",
     accent: "#D4A574",
-    helper: "You can change this anytime in Progress → Preferences.",
+    helper: "You can change this anytime in Preferences.",
   },
   {
     type: "points",
@@ -3234,6 +3446,7 @@ export {
   Onboarding,
   PracticeView,
   PreviewView,
+  PreferencesView,
   ProgressView,
   RealtimeFeedback,
   SessionSummary,

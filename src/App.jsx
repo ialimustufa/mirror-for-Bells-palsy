@@ -33,6 +33,7 @@ import {
   JournalView,
   Onboarding,
   PracticeView,
+  PreferencesView,
   ProgressView,
   SessionSummary,
   Sidebar,
@@ -421,7 +422,8 @@ export default function App() {
           {view === "practice" && <PracticeView movementProfile={data.movementProfile} sessions={data.sessions} personalizedPlanIds={personalizedPlanIds} recommendedPlanIds={recommendedPlanIds} savedRepeatCounts={data.prefs.personalPlan?.repeatCounts} savedRepCounts={data.prefs.personalPlan?.repCounts} onStartSession={startSession} onShowDetail={setExerciseDetail} onSavePersonalPlan={savePersonalPlan} onResetPersonalPlan={resetPersonalPlan} />}
           {view === "baseline" && <BaselineView data={data} onStartProfile={openProfileAssessment} onResetBaselines={resetMovementBaselines} />}
           {view === "journal" && <JournalView entries={data.journal} onSave={saveJournal} />}
-          {view === "progress" && <ProgressView data={data} streak={streak} prefs={data.prefs} dataTransferStatus={dataTransferStatus} onTogglePref={togglePref} onSetPref={setPref} onOpenReport={openStoredReport} onDeleteSession={deleteSession} onExportData={exportBrowserData} onExportClinicianBundle={exportClinicianBundle} onExportValidationDataset={exportValidationDataset} onImportData={importBrowserData} storageUsage={storageUsage} onRefreshStorageUsage={refreshStorageUsage} onClearAllData={clearAllData} />}
+          {view === "progress" && <ProgressView data={data} streak={streak} prefs={data.prefs} onOpenReport={openStoredReport} onDeleteSession={deleteSession} />}
+          {view === "preferences" && <PreferencesView prefs={data.prefs} dataTransferStatus={dataTransferStatus} onTogglePref={togglePref} onSetPref={setPref} onExportData={exportBrowserData} onExportClinicianBundle={exportClinicianBundle} onExportValidationDataset={exportValidationDataset} onImportData={importBrowserData} storageUsage={storageUsage} onRefreshStorageUsage={refreshStorageUsage} onClearAllData={clearAllData} />}
         </main>
         <footer className="mt-10 text-center text-xs text-stone-500">
           <MadeByFooter />
