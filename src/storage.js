@@ -1,9 +1,18 @@
+import { MEDIA_RETENTION_SESSIONS } from "./domain/config";
+
 const DB_NAME = "mirror-db";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const APP_STATE_STORE = "appState";
 const SESSIONS_STORE = "sessions";
 const SESSION_IMAGES_STORE = "sessionImages";
+// Legacy store: one record per captured frame. Superseded by SESSION_FRAME_ARCHIVE_STORE
+// (one gzip blob per session). Kept in the schema only so legacy rows can be migrated/cleared.
 const SESSION_FRAME_SAMPLES_STORE = "sessionFrameSamples";
+const SESSION_FRAME_ARCHIVE_STORE = "sessionFrameArchive";
+// Above this many legacy per-frame rows we drop rather than migrate: reading them all
+// into memory to re-pack risks the very OOM this change is meant to avoid. They are
+// opt-in debug samples, so reclaiming the space wins.
+const LEGACY_FRAME_MIGRATION_LIMIT = 8000;
 const APP_STATE_ID = "state";
 const SCHEMA_VERSION = 1;
 const LEGACY_STORAGE_KEY = "mirror-app-data";
@@ -72,6 +81,10 @@ function openMirrorDb() {
       ensureIndex(frameSamplesStore, "exerciseId", "exerciseId");
       ensureIndex(frameSamplesStore, "phase", "phase");
       ensureIndex(frameSamplesStore, "ts", "ts");
+
+      if (!db.objectStoreNames.contains(SESSION_FRAME_ARCHIVE_STORE)) {
+        db.createObjectStore(SESSION_FRAME_ARCHIVE_STORE, { keyPath: "sessionId" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => {
@@ -192,6 +205,117 @@ function makeFrameSampleRecord({ sessionId, sample, index, now }) {
     updatedAt: now,
     syncStatus: "local",
   };
+}
+
+const supportsCompressionStreams = () =>
+  typeof CompressionStream !== "undefined" && typeof DecompressionStream !== "undefined";
+
+// Pack an array of frame-sample records into a single gzip Blob (falls back to
+// uncompressed JSON where CompressionStream is unavailable). Returns null for empty input.
+// Exported for round-trip testing.
+export async function packFrameArchive(sessionId, frames, now) {
+  if (!sessionId || !Array.isArray(frames) || frames.length === 0) return null;
+  const json = JSON.stringify(frames);
+  let blob;
+  let encoding;
+  if (supportsCompressionStreams()) {
+    const stream = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
+    blob = await new Response(stream).blob();
+    encoding = "gzip";
+  } else {
+    blob = new Blob([json], { type: "application/json" });
+    encoding = "json";
+  }
+  return {
+    sessionId,
+    count: frames.length,
+    encoding,
+    blob,
+    createdAt: now,
+    updatedAt: now,
+    syncStatus: "local",
+  };
+}
+
+// Reverse of packFrameArchive: yields the flat frame-sample record array so the
+// export/summary paths see the same shape they did before archiving.
+export async function unpackFrameArchive(record) {
+  const blob = record?.blob;
+  if (!blob) return [];
+  try {
+    let text;
+    if (record.encoding === "gzip" && typeof DecompressionStream !== "undefined") {
+      const stream = blob.stream().pipeThrough(new DecompressionStream("gzip"));
+      text = await new Response(stream).text();
+    } else {
+      text = await blob.text();
+    }
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.error("Failed to read frame archive", record?.sessionId, error);
+    return [];
+  }
+}
+
+// Group prepared flat frame records by session and pack each group into one archive record.
+async function packFrameArchives(frameSamples, now) {
+  const bySession = new Map();
+  for (const sample of frameSamples ?? []) {
+    if (!sample?.sessionId) continue;
+    const group = bySession.get(sample.sessionId) ?? [];
+    group.push(sample);
+    bySession.set(sample.sessionId, group);
+  }
+  const archives = [];
+  for (const [sessionId, frames] of bySession) {
+    const archive = await packFrameArchive(sessionId, frames, now);
+    if (archive) archives.push(archive);
+  }
+  return archives;
+}
+
+// Retention: drop heavy media (image refs + counts) from all but the most recent
+// sessions. Scores/metrics are untouched. Mutates the compact session records in
+// place (they are shared with the app-facing `data`) and returns the evicted ids.
+// Exported for testing.
+export function applyMediaRetention(sessions) {
+  const evictedMediaSessionIds = [];
+  if (!Array.isArray(sessions) || !Number.isFinite(MEDIA_RETENTION_SESSIONS) || MEDIA_RETENTION_SESSIONS <= 0) {
+    return evictedMediaSessionIds;
+  }
+  const keepIds = new Set(
+    [...sessions]
+      .sort((a, b) => (b?.ts ?? b?.createdAt ?? 0) - (a?.ts ?? a?.createdAt ?? 0))
+      .slice(0, MEDIA_RETENTION_SESSIONS)
+      .map((session) => session?.id)
+      .filter(Boolean),
+  );
+  for (const session of sessions) {
+    if (!session?.id || keepIds.has(session.id)) continue;
+    const hadMedia = session.baselineImageId || session.hasBaselineSnapshot || session.imageCount
+      || session.snapshotCount || session.frameSampleCount
+      || (Array.isArray(session.scores) && session.scores.some((score) => score?.baselineImageId || score?.snapshotRefs?.length));
+    if (!hadMedia) continue;
+    delete session.baselineImageId;
+    delete session.hasBaselineSnapshot;
+    delete session.imageCount;
+    delete session.snapshotCount;
+    delete session.frameSampleCount;
+    if (Array.isArray(session.scores)) {
+      session.scores = session.scores.map((score) => {
+        if (!score || typeof score !== "object") return score;
+        const stripped = { ...score };
+        delete stripped.baselineImageId;
+        delete stripped.snapshotRefs;
+        delete stripped.snapshotCount;
+        delete stripped.hasBaselineSnapshot;
+        return stripped;
+      });
+    }
+    evictedMediaSessionIds.push(session.id);
+  }
+  return evictedMediaSessionIds;
 }
 
 async function prepareScoreForIndexedDb(score, sessionId, scoreIndex, now) {
@@ -331,80 +455,78 @@ async function prepareDataForIndexedDb(next) {
   const now = Date.now();
   const appState = buildAppStateRecord(next, now);
   const sessions = [];
-  const images = [];
+  const allImages = [];
   const frameSamples = [];
 
   for (const session of next?.sessions ?? []) {
     const prepared = await prepareSessionForIndexedDb(session, now);
     sessions.push(prepared.session);
-    images.push(...prepared.images);
+    allImages.push(...prepared.images);
     frameSamples.push(...prepared.frameSamples);
   }
+
+  const evictedMediaSessionIds = applyMediaRetention(sessions);
+  const evictedSet = new Set(evictedMediaSessionIds);
+  // A session that just captured media is always among the most recent, so retention
+  // never evicts what we're about to write — but guard anyway.
+  const images = allImages.filter((image) => !evictedSet.has(image.sessionId));
+  const frameArchives = await packFrameArchives(
+    frameSamples.filter((sample) => !evictedSet.has(sample.sessionId)),
+    now,
+  );
 
   return {
     appState,
     sessions,
     images,
-    frameSamples,
+    frameArchives,
+    evictedMediaSessionIds,
     data: { ...appStateRecordToData(appState), sessions },
   };
 }
 
-function collectReferencedImageIds(sessions = []) {
-  const ids = new Set();
-  for (const session of sessions) {
-    if (session?.baselineImageId) ids.add(session.baselineImageId);
-    for (const score of session?.scores ?? []) {
-      if (score?.baselineImageId) ids.add(score.baselineImageId);
-      for (const ref of score?.snapshotRefs ?? []) {
-        if (ref?.id) ids.add(ref.id);
-      }
-    }
-  }
-  return ids;
-}
-
-async function readReferencedSessionImages(db, referencedIds, replacementIds) {
-  if (!referencedIds.size) return [];
-  const tx = db.transaction(SESSION_IMAGES_STORE, "readonly");
-  const done = transactionDone(tx);
-  const request = tx.objectStore(SESSION_IMAGES_STORE).getAll();
-  const images = await requestToPromise(request);
-  await done;
-  return images.filter((image) => referencedIds.has(image.id) && !replacementIds.has(image.id));
-}
-
-async function readReferencedFrameSamples(db, referencedSessionIds, replacementSessionIds) {
-  if (!referencedSessionIds.size || !db.objectStoreNames.contains(SESSION_FRAME_SAMPLES_STORE)) return [];
-  const tx = db.transaction(SESSION_FRAME_SAMPLES_STORE, "readonly");
-  const done = transactionDone(tx);
-  const request = tx.objectStore(SESSION_FRAME_SAMPLES_STORE).getAll();
-  const samples = await requestToPromise(request);
-  await done;
-  return samples.filter((sample) => referencedSessionIds.has(sample.sessionId) && !replacementSessionIds.has(sample.sessionId));
-}
-
 async function writePreparedDataToIndexedDb(prepared) {
   const db = await openMirrorDb();
-  const referencedIds = collectReferencedImageIds(prepared.sessions);
-  const replacementIds = new Set(prepared.images.map((image) => image.id));
-  const referencedSessionIds = new Set(prepared.sessions.map((session) => session.id).filter(Boolean));
-  const replacementFrameSampleSessionIds = new Set(prepared.frameSamples.map((sample) => sample.sessionId).filter(Boolean));
-  const preservedImages = await readReferencedSessionImages(db, referencedIds, replacementIds);
-  const preservedFrameSamples = await readReferencedFrameSamples(db, referencedSessionIds, replacementFrameSampleSessionIds);
-  const tx = db.transaction([APP_STATE_STORE, SESSIONS_STORE, SESSION_IMAGES_STORE, SESSION_FRAME_SAMPLES_STORE], "readwrite");
+  const currentSessionIds = new Set(prepared.sessions.map((session) => session.id).filter(Boolean));
+  const evictedIds = prepared.evictedMediaSessionIds ?? [];
+
+  // Read-only pass gathers just the keys to delete (retention-evicted media + archives
+  // orphaned by deleted sessions). Reading keys — never blobs — keeps this O(records),
+  // not O(bytes), so save cost no longer scales with the total stored corpus.
+  const imageKeysToDelete = [];
+  const legacyFrameKeysToDelete = [];
+  const archiveKeysToDelete = [];
+  {
+    const rtx = db.transaction([SESSION_IMAGES_STORE, SESSION_FRAME_SAMPLES_STORE, SESSION_FRAME_ARCHIVE_STORE], "readonly");
+    const rdone = transactionDone(rtx);
+    const imagesIndex = rtx.objectStore(SESSION_IMAGES_STORE).index("sessionId");
+    const legacyIndex = rtx.objectStore(SESSION_FRAME_SAMPLES_STORE).index("sessionId");
+    const archiveKeys = await requestToPromise(rtx.objectStore(SESSION_FRAME_ARCHIVE_STORE).getAllKeys());
+    for (const sessionId of evictedIds) {
+      imageKeysToDelete.push(...await requestToPromise(imagesIndex.getAllKeys(sessionId)));
+      legacyFrameKeysToDelete.push(...await requestToPromise(legacyIndex.getAllKeys(sessionId)));
+    }
+    for (const key of archiveKeys) if (!currentSessionIds.has(key)) archiveKeysToDelete.push(key);
+    await rdone;
+  }
+
+  const tx = db.transaction([APP_STATE_STORE, SESSIONS_STORE, SESSION_IMAGES_STORE, SESSION_FRAME_ARCHIVE_STORE, SESSION_FRAME_SAMPLES_STORE], "readwrite");
   const done = transactionDone(tx);
   tx.objectStore(APP_STATE_STORE).put(prepared.appState);
   const sessionsStore = tx.objectStore(SESSIONS_STORE);
   const imagesStore = tx.objectStore(SESSION_IMAGES_STORE);
-  const frameSamplesStore = tx.objectStore(SESSION_FRAME_SAMPLES_STORE);
+  const archiveStore = tx.objectStore(SESSION_FRAME_ARCHIVE_STORE);
+  const legacyFrameStore = tx.objectStore(SESSION_FRAME_SAMPLES_STORE);
   sessionsStore.clear();
-  frameSamplesStore.clear();
   for (const session of prepared.sessions) sessionsStore.put(session);
+  // Incremental writes: only this change's blobs are written; untouched sessions keep
+  // their existing images/archives in place (no full-corpus read-and-rewrite).
   for (const image of prepared.images) imagesStore.put(image);
-  for (const image of preservedImages) imagesStore.put(image);
-  for (const sample of prepared.frameSamples) frameSamplesStore.put(sample);
-  for (const sample of preservedFrameSamples) frameSamplesStore.put(sample);
+  for (const archive of prepared.frameArchives) archiveStore.put(archive);
+  for (const key of imageKeysToDelete) imagesStore.delete(key);
+  for (const key of legacyFrameKeysToDelete) legacyFrameStore.delete(key);
+  for (const sessionId of evictedIds) archiveStore.delete(sessionId);
+  for (const key of archiveKeysToDelete) archiveStore.delete(key);
   await done;
 }
 
@@ -463,6 +585,28 @@ async function readIndexedDbStores(storeNames) {
   return Object.fromEntries(entries);
 }
 
+// Expand the per-session gzip archives (plus any not-yet-migrated legacy rows) back
+// into the flat frame-sample record array the export/import format uses.
+async function readFrameSamplesForExport() {
+  const db = await openMirrorDb();
+  const frames = [];
+  if (db.objectStoreNames.contains(SESSION_FRAME_ARCHIVE_STORE)) {
+    const tx = db.transaction(SESSION_FRAME_ARCHIVE_STORE, "readonly");
+    const done = transactionDone(tx);
+    const archives = await requestToPromise(tx.objectStore(SESSION_FRAME_ARCHIVE_STORE).getAll());
+    await done;
+    for (const archive of archives) frames.push(...await unpackFrameArchive(archive));
+  }
+  if (db.objectStoreNames.contains(SESSION_FRAME_SAMPLES_STORE)) {
+    const tx = db.transaction(SESSION_FRAME_SAMPLES_STORE, "readonly");
+    const done = transactionDone(tx);
+    const legacy = await requestToPromise(tx.objectStore(SESSION_FRAME_SAMPLES_STORE).getAll());
+    await done;
+    frames.push(...legacy);
+  }
+  return frames;
+}
+
 async function exportImageRecord(record) {
   if (!record || typeof record !== "object") return null;
   const { blob, ...rest } = record;
@@ -489,10 +633,10 @@ function browserDataSummary(stores) {
 }
 
 export async function exportMirrorBrowserData() {
-  const stores = await readIndexedDbStores([APP_STATE_STORE, SESSIONS_STORE, SESSION_IMAGES_STORE, SESSION_FRAME_SAMPLES_STORE]);
+  const stores = await readIndexedDbStores([APP_STATE_STORE, SESSIONS_STORE, SESSION_IMAGES_STORE]);
   const appState = recordArray(stores[APP_STATE_STORE]);
   const sessions = recordArray(stores[SESSIONS_STORE]);
-  const sessionFrameSamples = recordArray(stores[SESSION_FRAME_SAMPLES_STORE]);
+  const sessionFrameSamples = recordArray(await readFrameSamplesForExport());
   const sessionImages = [];
   for (const image of recordArray(stores[SESSION_IMAGES_STORE])) {
     const exported = await exportImageRecord(image);
@@ -686,30 +830,47 @@ async function normalizeImportedImageRecords(records, now) {
 
 async function replaceIndexedDbStores({ appState, sessions, sessionImages, sessionFrameSamples }) {
   const db = await openMirrorDb();
-  const tx = db.transaction([APP_STATE_STORE, SESSIONS_STORE, SESSION_IMAGES_STORE, SESSION_FRAME_SAMPLES_STORE], "readwrite");
+  // Pack imported frames into per-session archives before the write transaction
+  // (gzip is async and must not straddle the synchronous store writes).
+  const frameArchives = await packFrameArchives(sessionFrameSamples, Date.now());
+  const tx = db.transaction([APP_STATE_STORE, SESSIONS_STORE, SESSION_IMAGES_STORE, SESSION_FRAME_SAMPLES_STORE, SESSION_FRAME_ARCHIVE_STORE], "readwrite");
   const done = transactionDone(tx);
   const appStateStore = tx.objectStore(APP_STATE_STORE);
   const sessionsStore = tx.objectStore(SESSIONS_STORE);
   const imagesStore = tx.objectStore(SESSION_IMAGES_STORE);
   const frameSamplesStore = tx.objectStore(SESSION_FRAME_SAMPLES_STORE);
+  const archiveStore = tx.objectStore(SESSION_FRAME_ARCHIVE_STORE);
   appStateStore.clear();
   sessionsStore.clear();
   imagesStore.clear();
   frameSamplesStore.clear();
+  archiveStore.clear();
   for (const record of appState) appStateStore.put(record);
   for (const record of sessions) sessionsStore.put(record);
   for (const record of sessionImages) imagesStore.put(record);
-  for (const record of sessionFrameSamples) frameSamplesStore.put(record);
+  for (const record of frameArchives) archiveStore.put(record);
   await done;
 }
 
 async function replacePreparedDataInIndexedDb(prepared) {
-  await replaceIndexedDbStores({
-    appState: [prepared.appState],
-    sessions: prepared.sessions,
-    sessionImages: prepared.images,
-    sessionFrameSamples: prepared.frameSamples,
-  });
+  const db = await openMirrorDb();
+  const tx = db.transaction([APP_STATE_STORE, SESSIONS_STORE, SESSION_IMAGES_STORE, SESSION_FRAME_SAMPLES_STORE, SESSION_FRAME_ARCHIVE_STORE], "readwrite");
+  const done = transactionDone(tx);
+  const appStateStore = tx.objectStore(APP_STATE_STORE);
+  const sessionsStore = tx.objectStore(SESSIONS_STORE);
+  const imagesStore = tx.objectStore(SESSION_IMAGES_STORE);
+  const frameSamplesStore = tx.objectStore(SESSION_FRAME_SAMPLES_STORE);
+  const archiveStore = tx.objectStore(SESSION_FRAME_ARCHIVE_STORE);
+  appStateStore.clear();
+  sessionsStore.clear();
+  imagesStore.clear();
+  frameSamplesStore.clear();
+  archiveStore.clear();
+  appStateStore.put(prepared.appState);
+  for (const session of prepared.sessions) sessionsStore.put(session);
+  for (const image of prepared.images) imagesStore.put(image);
+  for (const archive of prepared.frameArchives ?? []) archiveStore.put(archive);
+  await done;
 }
 
 export async function importMirrorBrowserData(payload) {
@@ -809,8 +970,49 @@ function mergeMirrorData(primary, legacy) {
   };
 }
 
+// One-time upgrade from the legacy per-frame store to per-session gzip archives.
+// Small datasets are re-packed; oversized ones are dropped (see LEGACY_FRAME_MIGRATION_LIMIT)
+// rather than read wholesale into memory. Best-effort: failure leaves legacy rows in place,
+// and the export path still reads them.
+async function migrateLegacyFrameSamples() {
+  try {
+    const db = await openMirrorDb();
+    if (!db.objectStoreNames.contains(SESSION_FRAME_SAMPLES_STORE)) return;
+    const countTx = db.transaction(SESSION_FRAME_SAMPLES_STORE, "readonly");
+    const count = await requestToPromise(countTx.objectStore(SESSION_FRAME_SAMPLES_STORE).count());
+    await transactionDone(countTx);
+    if (!count) return;
+
+    if (count > LEGACY_FRAME_MIGRATION_LIMIT) {
+      const clearTx = db.transaction(SESSION_FRAME_SAMPLES_STORE, "readwrite");
+      clearTx.objectStore(SESSION_FRAME_SAMPLES_STORE).clear();
+      await transactionDone(clearTx);
+      console.warn(`Dropped ${count} legacy frame samples to reclaim storage (exceeded migration limit).`);
+      return;
+    }
+
+    const readTx = db.transaction(SESSION_FRAME_SAMPLES_STORE, "readonly");
+    const legacy = await requestToPromise(readTx.objectStore(SESSION_FRAME_SAMPLES_STORE).getAll());
+    await transactionDone(readTx);
+    const archives = await packFrameArchives(legacy, Date.now());
+
+    const writeTx = db.transaction([SESSION_FRAME_ARCHIVE_STORE, SESSION_FRAME_SAMPLES_STORE], "readwrite");
+    const wdone = transactionDone(writeTx);
+    const archiveStore = writeTx.objectStore(SESSION_FRAME_ARCHIVE_STORE);
+    for (const archive of archives) {
+      const existing = await requestToPromise(archiveStore.get(archive.sessionId));
+      if (!existing) archiveStore.put(archive);
+    }
+    writeTx.objectStore(SESSION_FRAME_SAMPLES_STORE).clear();
+    await wdone;
+  } catch (error) {
+    console.error("Failed to migrate legacy frame samples", error);
+  }
+}
+
 export async function loadMirrorData() {
   try {
+    await migrateLegacyFrameSamples();
     const indexedData = await readDataFromIndexedDb();
     const legacyData = readLegacyStorage();
     if (indexedData && legacyData) {
@@ -848,6 +1050,57 @@ export async function saveMirrorData(next) {
   }
 }
 
+export async function estimateStorageUsage() {
+  const result = {
+    usage: null,
+    quota: null,
+    counts: { sessions: 0, images: 0, frameArchives: 0, frameSamples: 0 },
+  };
+  try {
+    if (typeof navigator !== "undefined" && navigator.storage?.estimate) {
+      const { usage, quota } = await navigator.storage.estimate();
+      result.usage = usage ?? null;
+      result.quota = quota ?? null;
+    }
+  } catch (error) {
+    console.error("Failed to estimate storage usage", error);
+  }
+  try {
+    const db = await openMirrorDb();
+    const names = [SESSIONS_STORE, SESSION_IMAGES_STORE, SESSION_FRAME_ARCHIVE_STORE, SESSION_FRAME_SAMPLES_STORE]
+      .filter((name) => db.objectStoreNames.contains(name));
+    const tx = db.transaction(names, "readonly");
+    const done = transactionDone(tx);
+    const counts = {};
+    for (const name of names) counts[name] = await requestToPromise(tx.objectStore(name).count());
+    await done;
+    result.counts = {
+      sessions: counts[SESSIONS_STORE] ?? 0,
+      images: counts[SESSION_IMAGES_STORE] ?? 0,
+      frameArchives: counts[SESSION_FRAME_ARCHIVE_STORE] ?? 0,
+      frameSamples: counts[SESSION_FRAME_SAMPLES_STORE] ?? 0,
+    };
+  } catch (error) {
+    console.error("Failed to count stored records", error);
+  }
+  return result;
+}
+
+export async function clearAllMirrorData() {
+  try {
+    const db = await openMirrorDb();
+    const names = [APP_STATE_STORE, SESSIONS_STORE, SESSION_IMAGES_STORE, SESSION_FRAME_ARCHIVE_STORE, SESSION_FRAME_SAMPLES_STORE]
+      .filter((name) => db.objectStoreNames.contains(name));
+    const tx = db.transaction(names, "readwrite");
+    const done = transactionDone(tx);
+    for (const name of names) tx.objectStore(name).clear();
+    await done;
+  } catch (error) {
+    console.error("Failed to clear IndexedDB storage", error);
+  }
+  removeLegacyStorage();
+}
+
 export async function deleteSessionImages(sessionId) {
   if (!sessionId) return;
   try {
@@ -870,13 +1123,18 @@ export async function deleteSessionFrameSamples(sessionId) {
   if (!sessionId) return;
   try {
     const db = await openMirrorDb();
-    if (!db.objectStoreNames.contains(SESSION_FRAME_SAMPLES_STORE)) return;
-    const tx = db.transaction(SESSION_FRAME_SAMPLES_STORE, "readwrite");
+    const stores = [SESSION_FRAME_ARCHIVE_STORE, SESSION_FRAME_SAMPLES_STORE].filter((name) => db.objectStoreNames.contains(name));
+    if (!stores.length) return;
+    const tx = db.transaction(stores, "readwrite");
     const done = transactionDone(tx);
-    const store = tx.objectStore(SESSION_FRAME_SAMPLES_STORE);
-    const keysRequest = store.index("sessionId").getAllKeys(sessionId);
-    const keys = await requestToPromise(keysRequest);
-    for (const key of keys) store.delete(key);
+    if (db.objectStoreNames.contains(SESSION_FRAME_ARCHIVE_STORE)) {
+      tx.objectStore(SESSION_FRAME_ARCHIVE_STORE).delete(sessionId);
+    }
+    if (db.objectStoreNames.contains(SESSION_FRAME_SAMPLES_STORE)) {
+      const legacyStore = tx.objectStore(SESSION_FRAME_SAMPLES_STORE);
+      const keys = await requestToPromise(legacyStore.index("sessionId").getAllKeys(sessionId));
+      for (const key of keys) legacyStore.delete(key);
+    }
     await done;
   } catch (error) {
     console.error("Failed to delete session frame samples", error);

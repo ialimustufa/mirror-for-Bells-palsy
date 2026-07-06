@@ -2697,7 +2697,14 @@ function captureSnapshot(video, canvas, { width = REPORT_SNAPSHOT_WIDTH, quality
   ctx.translate(W, 0); ctx.scale(-1, 1); // mirror to match the on-screen video
   ctx.drawImage(video, 0, 0, W, H);
   ctx.restore();
-  try { return canvas.toDataURL("image/jpeg", quality); } catch { return null; }
+  try {
+    // Prefer WebP (~3-5x smaller than JPEG at equal quality). Browsers that don't
+    // support it silently return a PNG data URL, so fall back to JPEG when the
+    // requested WebP encoding isn't honored.
+    const webp = canvas.toDataURL("image/webp", quality);
+    if (typeof webp === "string" && webp.startsWith("data:image/webp")) return webp;
+    return canvas.toDataURL("image/jpeg", quality);
+  } catch { return null; }
 }
 
 function averageLandmarks(buffer) {
