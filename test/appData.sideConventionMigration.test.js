@@ -1,9 +1,21 @@
 import assert from "node:assert/strict";
+import process from "node:process";
 import test from "node:test";
-import { APP_SIDE_CONVENTION_VERSION, mergeMovementProfileRetake, needsSideConventionMigration, normalizeAppData, resetMovementProfileBaselines } from "../src/domain/appData.js";
+import { APP_SIDE_CONVENTION_VERSION, mergeMovementProfileRetake, needsAppDataMigration, needsSideConventionMigration, normalizeAppData, resetMovementProfileBaselines } from "../src/domain/appData.js";
 import { compareMovementProfiles, LEGACY_MOVEMENT_SIDE_CONVENTION, MOVEMENT_SIDE_CONVENTION } from "../src/ml/faceMetrics.js";
 
 const EXERCISE_ID = "closed-smile";
+
+function withTimeZone(timeZone, fn) {
+  const previous = process.env.TZ;
+  process.env.TZ = timeZone;
+  try {
+    fn();
+  } finally {
+    if (previous == null) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+}
 
 function makeLegacyExercise() {
   return {
@@ -73,6 +85,26 @@ test("marks historical session progress as legacy instead of pretending it was r
   assert.equal(session.movementProgress.sideConvention, LEGACY_MOVEMENT_SIDE_CONVENTION);
   assert.equal(session.movementProgress.side, "right");
   assert.equal(session.scores[0].initialMovementProgress.sideConvention, LEGACY_MOVEMENT_SIDE_CONVENTION);
+});
+
+test("normalizes record dates from local timestamps", () => {
+  withTimeZone("Asia/Kolkata", () => {
+    const ts = new Date(2026, 5, 27, 4, 20).getTime();
+    const raw = {
+      sessions: [{ date: "2026-06-26", ts, scores: [] }],
+      journal: [{ date: "2026-06-26", ts, symmetry: 5 }],
+      assessments: [{ date: "2026-06-26", ts, zones: [] }],
+    };
+
+    assert.equal(needsAppDataMigration(raw), true);
+
+    const normalized = normalizeAppData(raw);
+
+    assert.equal(normalized.sessions[0].date, "2026-06-27");
+    assert.equal(normalized.journal[0].date, "2026-06-27");
+    assert.equal(normalized.assessments[0].date, "2026-06-27");
+    assert.equal(needsAppDataMigration(normalized), false);
+  });
 });
 
 test("side-convention migration is idempotent once data is normalized", () => {

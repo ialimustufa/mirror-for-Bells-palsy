@@ -46,7 +46,10 @@ const EXERCISE_BLENDSHAPES = {
 
 const MOVEMENT_SIDE_CONVENTION = "user-anatomical-v1";
 const LEGACY_MOVEMENT_SIDE_CONVENTION = "legacy-image-left-v0";
-const SCORING_MODEL_VERSION = 2;
+// v3: directional blendshape fusion gates rep activation only; the symmetry ratio is
+// computed from geometry alone (previously the per-side assist inflated the healthy side
+// and dragged min/max symmetry down). See computeDirectionalExerciseSymmetry.
+const SCORING_MODEL_VERSION = 3;
 const DEFAULT_SCORING_NOISE_MODE = "normal";
 const SCORING_NOISE_MODES = ["normal", "soft", "raw"];
 const SCORING_NOISE_MODE_SET = new Set(SCORING_NOISE_MODES);
@@ -122,8 +125,16 @@ function normalizeScoringNoiseMode(mode) {
 
 function scoringOptionsFrom(options = {}) {
   const scoringNoiseMode = normalizeScoringNoiseMode(typeof options === "string" ? options : options?.scoringNoiseMode);
+  // scoringNoiseOverrides lets the replay/calibration harness sweep individual noise-gate
+  // constants (e.g. directionalGateCap) without editing source — the mechanism the scoring
+  // model comments call for when tuning the gate against captured frames. Production callers
+  // never pass it, so the selected mode's config is used verbatim.
+  const overrides = (typeof options === "object" && options?.scoringNoiseOverrides && typeof options.scoringNoiseOverrides === "object")
+    ? options.scoringNoiseOverrides
+    : null;
   return {
     ...SCORING_NOISE_CONFIG[scoringNoiseMode],
+    ...(overrides ?? {}),
     scoringNoiseMode,
     scoringDiagnosticsEnabled: Boolean(typeof options === "object" && options?.scoringDiagnosticsEnabled),
   };
@@ -410,6 +421,15 @@ const DIRECTIONAL_BS_FUSION = {
   smilePull: { left: "mouthSmileLeft", right: "mouthSmileRight", weight: 0.02, minRaw: 0.002 },
   cheekSuckInward: { left: "cheekSquintLeft", right: "cheekSquintRight", weight: 0.02, minRaw: 0.002 },
 };
+
+// Whether an exercise's symmetry ratio is affected by the blendshape-fusion change in
+// scoring model v3. Only these exercises can score differently under the fix, so a
+// rescore/backfill can use the others as an untouched control to validate that its
+// neutral/noise reconstruction reproduces the live numbers.
+function exerciseUsesBlendshapeFusion(exerciseId) {
+  const key = DIRECTIONAL_EXERCISE_SIGNALS[exerciseId]?.key;
+  return key != null && Object.prototype.hasOwnProperty.call(DIRECTIONAL_BS_FUSION, key);
+}
 
 // Raw image-left is the user's anatomical right, so fuse the opposite-named blendshape
 // (matching the convention used by computeNostrilFlareSymmetry). The calibration-time
@@ -871,7 +891,19 @@ function eyeClosureRawSignal(frame, neutralFrame, rawSide) {
   const neutralAperture = Math.max(0, neutralBottom - neutralTop);
   const apertureClose = Math.max(0, neutralAperture - currentAperture);
   const centerShift = Math.abs(((curTop + curBottom) / 2) - ((neutralTop + neutralBottom) / 2));
-  return Math.max(0, apertureClose - centerShift);
+  // Eye closure is the upper and lower lids CONVERGING — the upper lid does most of the travel,
+  // so the lid-pair center naturally shifts downward during a normal close. We must still reject
+  // common-mode artifacts (a head bob, or a normalization scale change from lateral eye drift)
+  // that shrink the apparent gap without the lids actually converging. Use the center shift as a
+  // GATE rather than a linear subtraction. For lid travels a (top down) and b (bottom up),
+  // apertureClose = a + b and centerShift = |a - b| / 2, so a genuine convergent close has
+  // centerShift / apertureClose <= 0.5 (max 0.5 when only one lid moves — the normal upper-lid
+  // close). Translation/scale drives the center as hard as the gap, pushing the ratio above 0.5
+  // (the lateral-drift artifact sits at ~0.67). Reject above 0.5, otherwise score the FULL
+  // aperture reduction. Previously we SUBTRACTED centerShift, which cancelled the upper-lid
+  // travel that IS the close and roughly halved a genuine closure.
+  if (2 * centerShift > apertureClose) return 0;
+  return apertureClose;
 }
 
 function directionalRawSignal(frame, neutralFrame, mapping, config, rawSide) {
@@ -929,9 +961,19 @@ function computeDirectionalExerciseSymmetry(exerciseId, lm, neutral, noiseFloor,
   const rHasDirection = fusion != null && signals.right != null && signals.right >= fusion.minRaw;
   const lBsAssist = lHasDirection ? fusion.weight * directionalBsActivation(bsMap, neutralBs, fusion, "left") : 0;
   const rBsAssist = rHasDirection ? fusion.weight * directionalBsActivation(bsMap, neutralBs, fusion, "right") : 0;
-  const lAdjusted = left.adjusted + lBsAssist;
-  const rAdjusted = right.adjusted + rBsAssist;
-  const peak = Math.max(lAdjusted, rAdjusted);
+  // Gate, don't score: the blendshape assist only rescues a rep from being dropped
+  // (it feeds the fused peak the activation gate sees). The symmetry RATIO is computed
+  // from geometry alone. The blendshape model reports a stronger activation on the side
+  // that is actually moving (the healthy side on a palsy face), so folding the assist
+  // into the ratio inflated the larger side and pushed min/max down — making a face read
+  // as MORE asymmetric the harder the healthy side worked. Geometry already carries the
+  // true left/right balance; blendshapes only tell us movement happened at all.
+  const lGeom = left.adjusted;
+  const rGeom = right.adjusted;
+  const lFused = lGeom + lBsAssist;
+  const rFused = rGeom + rBsAssist;
+  const fusedPeak = Math.max(lFused, rFused);
+  const geomPeak = Math.max(lGeom, rGeom);
   const gate = directionalExerciseGate(config, left.noise, right.noise, options);
   const debugPayload = {
     signalType: config.type,
@@ -940,30 +982,52 @@ function computeDirectionalExerciseSymmetry(exerciseId, lm, neutral, noiseFloor,
       signal: debugMetric(left.raw),
       noisePenalty: debugMetric(left.noisePenalty),
       blendshapeAssist: debugMetric(lBsAssist),
-      adjusted: debugMetric(lAdjusted),
-      final: debugMetric(lAdjusted),
+      adjusted: debugMetric(lGeom),
+      fused: debugMetric(lFused),
+      final: debugMetric(lGeom),
     },
     rawImageRight: {
       signal: debugMetric(right.raw),
       noisePenalty: debugMetric(right.noisePenalty),
       blendshapeAssist: debugMetric(rBsAssist),
-      adjusted: debugMetric(rAdjusted),
-      final: debugMetric(rAdjusted),
+      adjusted: debugMetric(rGeom),
+      fused: debugMetric(rFused),
+      final: debugMetric(rGeom),
     },
-    returnedUserLeftDisp: debugMetric(rAdjusted),
-    returnedUserRightDisp: debugMetric(lAdjusted),
-    peak: debugMetric(peak),
+    returnedUserLeftDisp: debugMetric(rGeom),
+    returnedUserRightDisp: debugMetric(lGeom),
+    peak: debugMetric(fusedPeak),
+    geomPeak: debugMetric(geomPeak),
     gate: debugMetric(gate),
     noiseSource: config.key,
-    activationState: { aboveGate: peak >= gate },
+    activationState: { aboveGate: fusedPeak >= gate },
   };
-  if (peak < gate) {
+  if (fusedPeak < gate) {
     logScoringDiagnostics(exerciseId, "below signal gate", debugPayload, options);
     return null;
   }
-  const symmetry = Math.min(lAdjusted, rAdjusted) / peak;
+  // Movement detected only through the blendshape (geometry fully eaten by the noise
+  // floor on both sides): the rep moved, but there is no geometric balance to score, so
+  // drop it instead of returning a fabricated 0/0 symmetry that would tank the average.
+  if (geomPeak <= 0) {
+    logScoringDiagnostics(exerciseId, "blendshape-only, no geometric balance", debugPayload, options);
+    return null;
+  }
+  const symmetry = Math.min(lGeom, rGeom) / geomPeak;
   logScoringDiagnostics(exerciseId, "scored", { ...debugPayload, symmetry: debugMetric(symmetry) }, options);
-  return { symmetry, leftDisp: lAdjusted, rightDisp: rAdjusted, peak, directionalKey: config.key };
+  // gate/leftNoise/rightNoise/minSignal are surfaced for the calibration harness: they let a
+  // sweep recompute the admit decision for any gate constants without re-scoring each frame.
+  return {
+    symmetry,
+    leftDisp: lGeom,
+    rightDisp: rGeom,
+    peak: fusedPeak,
+    gate,
+    leftNoise: left.noise,
+    rightNoise: right.noise,
+    minSignal: config.minSignal ?? SCORING_ABSOLUTE_MIN_SIGNAL,
+    directionalKey: config.key,
+  };
 }
 
 function waterHoldSealLeakSignal(frame, neutralFrame, rawSide) {
@@ -998,6 +1062,13 @@ function computeWaterHoldSymmetry(exerciseId, lm, neutral, noiseFloor, facialTra
   const sealPenalty = leakSignal * WATER_HOLD_SEAL_LEAK_WEIGHT;
   const penalty = isolationPenalty + sealPenalty;
   const quality = targetSignal > 0 ? clampNumber(targetSignal / (targetSignal + penalty), 0, 1) : 0;
+  // Water hold is a one-sided isolation, not a left/right symmetry: even a clean hold keeps a
+  // little opposite-side movement and seal activity, so penalty ~ target and `quality` pins near
+  // 0.5 — a good hold then reads ~45% on the raw 0-1 scale and drags the session symmetry average
+  // (where two-sided exercises reach 90%+). Floor a scored hold at 50% and map the quality into
+  // [0.5, 1.0]: a neutral hold = 50%, a clean isolated hold climbs from there. Only applied once
+  // the hold clears the target gate below, so a non-attempt still scores nothing.
+  const scaledQuality = clampNumber(0.5 + quality * 0.5, 0.5, 1);
   const gate = Math.max(SCORING_ABSOLUTE_MIN_SIGNAL, options.pairwiseGate * 0.5);
   const debugPayload = {
     targetUserSide,
@@ -1029,9 +1100,9 @@ function computeWaterHoldSymmetry(exerciseId, lm, neutral, noiseFloor, facialTra
     logScoringDiagnostics(exerciseId, "below target gate", debugPayload, options);
     return null;
   }
-  logScoringDiagnostics(exerciseId, "scored", { ...debugPayload, symmetry: debugMetric(quality) }, options);
+  logScoringDiagnostics(exerciseId, "scored", { ...debugPayload, rawQuality: debugMetric(quality), symmetry: debugMetric(scaledQuality) }, options);
   return {
-    symmetry: quality,
+    symmetry: scaledQuality,
     leftDisp: rawSignals.left.adjusted,
     rightDisp: rawSignals.right.adjusted,
     peak: targetSignal,
@@ -1230,6 +1301,38 @@ const NOSE_SCRUNCH_EXERCISES = new Set(["emoji-nose-scrunch"]);
 const NOSE_EXERCISES = new Set([...NOSTRIL_FLARE_EXERCISES, ...NOSE_SCRUNCH_EXERCISES]);
 const NOSE_PROFILE_THRESHOLD_FLOOR = 0.0008;
 const NOSE_PROFILE_THRESHOLD_MAX = 0.0014;
+// Subtle exercises occasionally capture a transient spike during calibration (e.g. a blink
+// while calibrating eye closure), inflating the baseline peak so the activation threshold
+// (peak*0.35) becomes unreachable and every rep is force-skipped. Cap each family's threshold
+// the same way the nose family is capped, so a mis-scaled baseline can never push the gate
+// above what the scorer actually produces. Caps are set just above the achievable threshold
+// observed in real captures, so good calibrations are untouched and only gross inflation is
+// clamped. eyeClosure/smilePull/puckerInward are grounded in captured peak distributions
+// (2026-06-26 dataset); cheek and lip-press lack capture data and use provisional ceilings in
+// the same vector-scale ballpark — validate these against a capture that includes them.
+const SUBTLE_PROFILE_THRESHOLD_MAX_BY_KEY = {
+  eyeClosure: 0.012,        // captured: working ~0.0103, achievable peaks 0.01-0.05
+  smilePull: 0.45,          // captured (open-smile): working ~0.39, peaks 0.20-0.86
+  // pucker: the earlier 0.45 was set to the INFLATED baseline value (~0.43) and dropped 23%
+  // of genuine reps. Captured pucker peaks are p10/p50/p90 = 0.27/0.52/0.70 with ~zero noise,
+  // so minimumVisible should be ~20% of the median peak (~0.10). Cap at 0.12 — a non-inflated
+  // baseline derives ~0.10 (unclamped); only an inflated baseline is clamped. Lifts activation
+  // 78% -> 97% on the captured data.
+  puckerInward: 0.12,       // captured (pucker): peaks 0.27-0.70, ~zero noise floor
+  cheekSuckInward: 0.18,    // validated: captured peaks 0.38-1.19, threshold ~0.17, 100% activation
+  cheekPuffOutward: 0.18,   // provisional (no capture; same signal scale as cheek-suck)
+};
+const SUBTLE_PROFILE_THRESHOLD_MAX_BY_EXERCISE = {
+  "lip-press": 0.1,         // provisional (pairwise-scored, no capture)
+};
+
+function subtleProfileThresholdMax(exerciseId) {
+  const key = DIRECTIONAL_EXERCISE_SIGNALS[exerciseId]?.key;
+  const keyCap = key != null ? SUBTLE_PROFILE_THRESHOLD_MAX_BY_KEY[key] : undefined;
+  const exerciseCap = SUBTLE_PROFILE_THRESHOLD_MAX_BY_EXERCISE[exerciseId];
+  const cap = Math.min(keyCap ?? Infinity, exerciseCap ?? Infinity);
+  return Number.isFinite(cap) ? cap : null;
+}
 
 function avgXY(frame, idxs) {
   let sx = 0, sy = 0, c = 0;
@@ -1989,6 +2092,8 @@ function thresholdBandsForExercise(exerciseId, peak) {
 function effectiveProfileThreshold(exerciseId, threshold) {
   if (threshold == null) return null;
   if (NOSE_EXERCISES.has(exerciseId)) return Math.min(threshold, NOSE_PROFILE_THRESHOLD_MAX);
+  const subtleCap = subtleProfileThresholdMax(exerciseId);
+  if (subtleCap != null) return Math.min(threshold, subtleCap);
   return threshold;
 }
 
@@ -2841,6 +2946,7 @@ export {
   effectiveProfileThreshold,
   profileLiveScoringThreshold,
   exerciseBaselineQuality,
+  exerciseUsesBlendshapeFusion,
   faceAlignmentFeedback,
   faceFrameNormalize,
   firstFacialTransformationMatrix,

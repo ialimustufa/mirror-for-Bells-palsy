@@ -8,6 +8,8 @@
     "dev": "vite",
     "test": "node --import ./scripts/register-extensionless-loader.mjs --test test/*.test.js",
     "replay:frames": "node --import ./scripts/register-extensionless-loader.mjs scripts/replay-frame-samples.mjs",
+    "backfill:rescore": "node --import ./scripts/register-extensionless-loader.mjs scripts/backfill-rescore.mjs",
+    "calibrate:directional-gate": "node --max-old-space-size=6144 --import ./scripts/register-extensionless-loader.mjs scripts/calibrate-directional-gate.mjs",
     "validate:dataset": "node --import ./scripts/register-extensionless-loader.mjs scripts/evaluate-validation-dataset.mjs",
     "validation:label-sheet": "node scripts/export-validation-label-sheet.mjs",
     "validation:clinical-review-package": "node --import ./scripts/register-extensionless-loader.mjs scripts/create-clinical-review-package.mjs",

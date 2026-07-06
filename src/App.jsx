@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { archiveMovementProfile, mergeMissingMovementProfileBaselines, mergeMovementProfileRetake, needsSideConventionMigration, normalizeAppData, resetMovementProfileBaselines } from "./domain/appData";
+import { archiveMovementProfile, mergeMissingMovementProfileBaselines, mergeMovementProfileRetake, needsAppDataMigration, normalizeAppData, resetMovementProfileBaselines } from "./domain/appData";
 import { PROFILE_HISTORY_LIMIT } from "./domain/config";
 import { ASSESSMENT_SESSION_KIND, appendAssessmentRecord, buildStandardAssessmentExercises, summarizeAssessmentSession } from "./domain/assessment";
 import { buildClinicianBundleRecords, createClinicianBundleExportBlob } from "./domain/clinicianBundle";
@@ -14,6 +14,7 @@ import {
   computeStreak,
   getComfortDosing,
   isCountedSession,
+  recordDateISO,
   todayISO,
 } from "./domain/session";
 import { compactAppDataForStorage, createMirrorBrowserDataExportBlob, deleteSessionFrameSamples, deleteSessionImages, exportMirrorBrowserData, hydrateSessionImages, importMirrorBrowserData, loadMirrorData, parseMirrorBrowserDataFile, saveMirrorData } from "./storage";
@@ -90,7 +91,7 @@ export default function App() {
       try {
         const stored = await loadMirrorData();
         if (stored) {
-          const shouldPersistMigration = needsSideConventionMigration(stored);
+          const shouldPersistMigration = needsAppDataMigration(stored);
           const normalized = withPersonalRecoveryModel(normalizeAppData(stored));
           setData(normalized);
           if (shouldPersistMigration) {
@@ -98,7 +99,7 @@ export default function App() {
               const saved = await saveMirrorData(normalized);
               setData(withPersonalRecoveryModel(normalizeAppData(saved)));
             } catch (error) {
-              console.error("Failed to persist side-convention migration", error);
+              console.error("Failed to persist app data migration", error);
             }
           }
           if (!normalized.prefs?.onboarded) setShowOnboarding(true);
@@ -298,7 +299,7 @@ export default function App() {
       await persistQueueRef.current.catch(() => {});
       const payload = await exportMirrorBrowserData();
       const blob = createMirrorBrowserDataExportBlob(payload);
-      const filename = `mirror-browser-data-${new Date().toISOString().slice(0, 10)}.jsonl`;
+      const filename = `mirror-browser-data-${todayISO()}.jsonl`;
       downloadFile(blob, filename);
       setDataTransferStatus({ kind: "success", message: `Exported ${payload.summary?.sessions ?? 0} sessions.` });
     } catch (error) {
@@ -313,7 +314,7 @@ export default function App() {
       const payload = await exportMirrorBrowserData();
       const records = buildClinicianBundleRecords(payload);
       const blob = createClinicianBundleExportBlob(records);
-      const filename = `mirror-clinician-bundle-${new Date().toISOString().slice(0, 10)}.jsonl`;
+      const filename = `mirror-clinician-bundle-${todayISO()}.jsonl`;
       downloadFile(blob, filename);
       setDataTransferStatus({ kind: "success", message: `Exported clinician bundle with ${records[0]?.summary?.sessions ?? 0} sessions.` });
     } catch (error) {
@@ -334,7 +335,7 @@ export default function App() {
         return;
       }
       const blob = createValidationDatasetExportBlob(records);
-      const filename = `mirror-validation-dataset-${new Date().toISOString().slice(0, 10)}.jsonl`;
+      const filename = `mirror-validation-dataset-${todayISO()}.jsonl`;
       downloadFile(blob, filename);
       setDataTransferStatus({ kind: "success", message: `Exported validation dataset with ${sampleCount} frame samples and ${clinicalScaleAssessmentCount} clinical-scale assessment rows.` });
     } catch (error) {
@@ -395,7 +396,7 @@ export default function App() {
         </footer>
       </div>
       <BottomNav view={view} setView={setView} />
-      {session && <SessionMode session={session} prefs={data.prefs} movementProfile={data.movementProfile} initialMovementProfile={data.initialMovementProfile ?? data.movementProfile} sessionsToday={data.sessions.filter((s) => s.date === todayISO() && isCountedSession(s)).length} onComplete={completeSession} onCancel={() => setSession(null)} onTogglePref={togglePref} onRequestProfileRetake={requestProfileRetake} />}
+      {session && <SessionMode session={session} prefs={data.prefs} movementProfile={data.movementProfile} initialMovementProfile={data.initialMovementProfile ?? data.movementProfile} sessionsToday={data.sessions.filter((s) => recordDateISO(s) === todayISO() && isCountedSession(s)).length} onComplete={completeSession} onCancel={() => setSession(null)} onTogglePref={togglePref} onRequestProfileRetake={requestProfileRetake} />}
       {exerciseDetail && <ExerciseDetail exercise={exerciseDetail} movementProfile={data.movementProfile} onClose={() => setExerciseDetail(null)} onStart={(id) => { setExerciseDetail(null); startSession([id]); }} />}
       {showOnboarding && <Onboarding onDone={finishOnboarding} dailyGoal={data.prefs.dailyGoal} onSetDailyGoal={(n) => setPref("dailyGoal", n)} voiceEnabled={data.prefs.voiceEnabled} onToggleVoice={() => togglePref("voiceEnabled")} />}
       {profileAssessment && <ProfileAssessment existingProfile={data.movementProfile} retakeExerciseIds={profileAssessment.retakeExerciseIds} prefs={data.prefs} onTogglePref={togglePref} onComplete={saveMovementProfile} onSkip={() => setProfileAssessment(null)} />}

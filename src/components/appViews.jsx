@@ -9,9 +9,9 @@ import { EXERCISES, MOOD_OPTIONS, PROFILE_ASSESSMENT_EXERCISES, PROFILE_STARTER_
 import { personalRecoveryFocusItems } from "../domain/personalRecoveryModel";
 import { summarizeJournalSafetyPrompts } from "../domain/safetyPrompts";
 import { summarizeSessionDiagnostics } from "../domain/sessionDiagnostics";
-import { applySessionDose, buildSessionExercises, clampNumber, daysBetween, exerciseHoldSec, exercisePlannedSec, formatClock, getComfortDosing, isCountedSession, nextSessionAt, spreadRepeatedExercises, todayISO } from "../domain/session";
+import { addDaysISO, applySessionDose, buildSessionExercises, clampNumber, daysBetween, exerciseHoldSec, exercisePlannedSec, formatCalendarDate, formatClock, getComfortDosing, isCountedSession, nextSessionAt, recordDateISO, spreadRepeatedExercises, todayISO } from "../domain/session";
 import { formatDuration, formatSessionDate, shareSessionReport } from "../reports/sessionReport";
-import { displayPct, scoreColor } from "../ui/scoreFormatting";
+import { displayPct, recoveryColor, scoreColor } from "../ui/scoreFormatting";
 import { SCORING_NOISE_MODES, baselineProgressLabel, compareMovementProfiles, focusReason, formatProfileDate, formatProfileSide, getAdaptiveFocusItems, latestExerciseProgressById, latestSessionMovementProgress, movementBalanceLabel, movementProgressLabel, objectCoverTransform, orderExerciseIdsByRegion, preferredBaselineProgress, preferredMovementProgress, profileExerciseEntries, profileStatus, progressUsesLegacySideConvention, sessionFocusRecommendation, signedPointDelta } from "../ml/faceMetrics";
 import { flushSpeech, primeSpeech, warmSpeechVoices } from "../lib/speech";
 
@@ -36,6 +36,8 @@ const SCORING_NOISE_MODE_DESCRIPTIONS = {
   soft: "Reduced penalties for low movement testing.",
   raw: "No noise subtraction; minimum gates only.",
 };
+
+const PAST_SESSIONS_PAGE_SIZE = 5;
 
 function Header({ view, streak }) {
   const titles = { home: "Today", practice: "Practice", baseline: "Baseline", journal: "Journal", progress: "Progress" };
@@ -97,6 +99,10 @@ function sameExerciseSet(a = [], b = []) {
 function progressSummaryLabel(progress) {
   if (!progress) return null;
   return progress.affectedProgressRatio != null ? movementProgressLabel(progress) : baselineProgressLabel(progress);
+}
+
+function formatShortRecordDate(record) {
+  return formatCalendarDate(recordDateISO(record), { month: "short", day: "numeric" });
 }
 
 function progressSideLabel(progress) {
@@ -324,9 +330,10 @@ function BaselineManagerPanel({ profile, onRedo, onReset }) {
 function HomeView({ data, streak, personalizedPlanIds, recommendedPlanIds, onStartProfile, onStartSession, onStartAssessment, onGo, onResetPersonalPlan }) {
   // Home is a derived dashboard: it summarizes today's stored records and maps the
   // configured daily goal into the next practice prompt.
-  const todaysSessions = data.sessions.filter((s) => s.date === todayISO());
+  const today = todayISO();
+  const todaysSessions = data.sessions.filter((s) => recordDateISO(s) === today);
   const todaysCountedSessions = todaysSessions.filter(isCountedSession);
-  const todaysJournal = data.journal.find((j) => j.date === todayISO());
+  const todaysJournal = data.journal.find((j) => recordDateISO(j) === today);
   const dailyGoal = data.prefs.dailyGoal ?? 3;
   const todaysPlan = useMemo(() => personalizedPlanIds?.length ? personalizedPlanIds : (recommendedPlanIds ?? []), [personalizedPlanIds, recommendedPlanIds]);
   const planRepeatCounts = data.prefs.personalPlan?.repeatCounts ?? EMPTY_COUNTS;
@@ -1673,9 +1680,9 @@ function ClinicalScaleEstimatePanel({ clinicalScales }) {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           {cards.map((card) => (
             <div key={card.key} className="rounded-xl p-3" style={{ background: "rgba(244,239,230,0.06)", border: "1px solid rgba(244,239,230,0.08)" }}>
-              <div className="flex items-start justify-between gap-2 mb-1">
-                <div className="text-[10px] uppercase tracking-wider opacity-50">{card.label}</div>
-                <div className="text-[9px] uppercase tracking-wider opacity-50">{card.statusLabel}</div>
+              <div className="mb-2 min-w-0">
+                <div className="text-[10px] uppercase tracking-wider opacity-50 leading-snug" style={{ overflowWrap: "anywhere", hyphens: "auto" }}>{card.label}</div>
+                <div className="text-[9px] uppercase tracking-wider opacity-50 leading-snug mt-1" style={{ overflowWrap: "anywhere", hyphens: "auto" }}>{card.statusLabel}</div>
               </div>
               <div className="text-xl tabular-nums" style={{ fontFamily: "Fraunces", fontWeight: 600 }}>{card.value}</div>
               <div className="text-[11px] opacity-62 mt-1 leading-snug">{card.sublabel}</div>
@@ -1936,13 +1943,54 @@ function PastSessionRow({ session, onOpen, onDelete }) {
 }
 
 function PastSessionsList({ sessions, onOpen, onDelete }) {
-  const sorted = [...sessions].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 30);
+  const [page, setPage] = useState(0);
+  const sorted = useMemo(() => [...sessions].sort((a, b) => (b.ts || 0) - (a.ts || 0)), [sessions]);
+  const pageCount = Math.ceil(sorted.length / PAST_SESSIONS_PAGE_SIZE);
+  const lastPage = Math.max(0, pageCount - 1);
+  const currentPage = Math.min(page, lastPage);
+  const start = currentPage * PAST_SESSIONS_PAGE_SIZE;
+  const visible = sorted.slice(start, start + PAST_SESSIONS_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, Math.max(0, pageCount - 1)));
+  }, [pageCount]);
+
   if (sorted.length === 0) return null;
   return (
     <div className="rounded-2xl p-5" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
-      <div className="text-sm font-semibold mb-3">Past sessions</div>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-semibold">Past sessions</div>
+          {pageCount > 1 && (
+            <div className="text-xs text-stone-500 tabular-nums mt-0.5">{start + 1}-{Math.min(start + PAST_SESSIONS_PAGE_SIZE, sorted.length)} of {sorted.length}</div>
+          )}
+        </div>
+        {pageCount > 1 && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => setPage((value) => Math.max(0, value - 1))}
+              disabled={currentPage === 0}
+              aria-label="Show newer sessions"
+              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+              style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div className="text-xs text-stone-500 tabular-nums px-1.5">{currentPage + 1}/{pageCount}</div>
+            <button
+              onClick={() => setPage((value) => Math.min(lastPage, value + 1))}
+              disabled={currentPage === lastPage}
+              aria-label="Show older sessions"
+              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+              style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+      </div>
       <div className="space-y-1.5">
-        {sorted.map((s) => {
+        {visible.map((s) => {
           const exCount = (s.exercises ?? s.scores ?? []).length;
           return <PastSessionRow key={s.id || s.ts || `${s.date}-${exCount}`} session={s} onOpen={onOpen} onDelete={onDelete} />;
         })}
@@ -2041,13 +2089,13 @@ function TimelapseModal({ exercise, startIdx, onClose }) {
 
 function JournalView({ entries, onSave }) {
   const today = todayISO();
-  const todayEntry = entries.find((e) => e.date === today);
+  const todayEntry = entries.find((e) => recordDateISO(e) === today);
   const [symmetry, setSymmetry] = useState(todayEntry?.symmetry ?? 5);
   const [mood, setMood] = useState(todayEntry?.mood ?? "okay");
   const [notes, setNotes] = useState(todayEntry?.notes ?? "");
   const [saved, setSaved] = useState(false);
   const handleSave = () => { onSave({ date: today, symmetry, mood, notes, ts: Date.now() }); setSaved(true); setTimeout(() => setSaved(false), 2000); };
-  const past = [...entries].filter((e) => e.date !== today).reverse();
+  const past = [...entries].filter((e) => recordDateISO(e) !== today).reverse();
 
   return (
     <div className="space-y-6">
@@ -2094,7 +2142,7 @@ function JournalPrompt({ session, onSave, onSkip }) {
   const [symmetry, setSymmetry] = useState(autoRating.value);
   const [mood, setMood] = useState(moodFromRating(autoRating.value));
   const [notes, setNotes] = useState("");
-  const date = session?.date ?? todayISO();
+  const date = recordDateISO(session) ?? todayISO();
   const save = () => {
     onSave({
       date,
@@ -2157,8 +2205,7 @@ function JournalPrompt({ session, onSave, onSkip }) {
 
 function PastEntryRow({ entry }) {
   const mood = MOOD_OPTIONS.find((m) => m.key === entry.mood);
-  const d = new Date(entry.date);
-  const label = d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  const label = formatCalendarDate(recordDateISO(entry), { weekday: "short", month: "short", day: "numeric" });
   return (
     <div className="rounded-2xl p-3 flex items-center gap-3" style={{ background: "rgba(255, 255, 255, 0.4)", border: "1px solid rgba(31, 27, 22, 0.04)" }}>
       <div className="text-xl">{mood?.emoji ?? "·"}</div>
@@ -2380,7 +2427,13 @@ function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, o
   const practiceSessions = useMemo(() => data.sessions.filter((session) => session.kind !== "assessment"), [data.sessions]);
   const assessments = useMemo(() => data.assessments ?? [], [data.assessments]);
   const totalSessions = practiceSessions.length;
-  const last7DaysSessions = practiceSessions.filter((s) => { const days = daysBetween(s.date, todayISO()); return days >= 0 && days < 7; }).length;
+  const today = todayISO();
+  const last7DaysSessions = practiceSessions.filter((s) => {
+    const date = recordDateISO(s);
+    if (!date) return false;
+    const days = daysBetween(date, today);
+    return days >= 0 && days < 7;
+  }).length;
   const personalModelDisabled = prefs.personalModelEnabled === false;
   const showClinicalScaleEstimates = prefs.clinicalScaleEstimatesEnabled !== false;
   const personalModel = personalModelDisabled ? null : data.personalRecoveryModel;
@@ -2392,27 +2445,32 @@ function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, o
   const personalFocusItems = useMemo(() => personalRecoveryFocusItems(personalModel, 3), [personalModel]);
   const modelStatus = personalModelDisabled ? "disabled" : personalModel?.status ?? "collecting";
   const modelStatusColor = modelStatus === "high" ? "#7A8F73" : modelStatus === "medium" ? "#6E7F59" : modelStatus === "low" ? "#D4A574" : modelStatus === "disabled" ? "#A8A29E" : "#A8A29E";
-  const journalChartData = useMemo(() => data.journal.length === 0 ? [] : data.journal.slice(-21).map((j) => ({ date: new Date(j.date).toLocaleDateString(undefined, { month: "short", day: "numeric" }), symmetry: j.symmetry })), [data.journal]);
-  const aiSymmetryData = useMemo(() => practiceSessions.filter((s) => s.sessionAvg != null).slice(-21).map((s) => ({ date: new Date(s.date).toLocaleDateString(undefined, { month: "short", day: "numeric" }), score: displayPct(s.sessionAvg) })), [practiceSessions]);
-  const assessmentTrendData = useMemo(() => assessments.filter((assessment) => assessment.averageVoluntaryMovement != null).slice(-21).map((assessment) => ({ date: new Date(assessment.date ?? assessment.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }), score: Math.round(assessment.averageVoluntaryMovement * 100) })), [assessments]);
+  const journalChartData = useMemo(() => data.journal.length === 0 ? [] : data.journal.slice(-21).map((j) => ({ date: formatShortRecordDate(j), symmetry: j.symmetry })), [data.journal]);
+  const aiSymmetryData = useMemo(() => practiceSessions.filter((s) => s.sessionAvg != null).slice(-21).map((s) => ({ date: formatShortRecordDate(s), score: displayPct(s.sessionAvg) })), [practiceSessions]);
+  const assessmentTrendData = useMemo(() => assessments.filter((assessment) => assessment.averageVoluntaryMovement != null).slice(-21).map((assessment) => ({ date: formatShortRecordDate(assessment), score: Math.round(assessment.averageVoluntaryMovement * 100) })), [assessments]);
   const journalSafetyPrompts = useMemo(() => summarizeJournalSafetyPrompts(data.journal), [data.journal]);
   const baselineProgressData = useMemo(() => practiceSessions.map((s) => {
     const progress = preferredMovementProgress(s) ?? preferredBaselineProgress(s);
     const ratio = progress?.affectedProgressRatio ?? progress?.ratio;
-    return ratio == null ? null : { date: new Date(s.date).toLocaleDateString(undefined, { month: "short", day: "numeric" }), progress: Math.round(ratio * 100) };
+    return ratio == null ? null : { date: formatShortRecordDate(s), progress: Math.round(ratio * 100) };
   }).filter(Boolean).slice(-21), [practiceSessions]);
   const activityGrid = useMemo(() => {
-    const today = new Date(); const grid = [];
+    const grid = [];
     for (let i = 13; i >= 0; i--) {
-      const d = new Date(today); d.setDate(d.getDate() - i);
-      const iso = d.toISOString().split("T")[0];
-      const daySessions = practiceSessions.filter((s) => s.date === iso);
-      const symAvgs = daySessions.map((s) => s.sessionAvg).filter((v) => v != null);
-      const dayAvg = symAvgs.length > 0 ? symAvgs.reduce((a, b) => a + b, 0) / symAvgs.length : null;
-      grid.push({ date: iso, count: daySessions.length, avg: dayAvg });
+      const iso = addDaysISO(today, -i);
+      const daySessions = practiceSessions.filter((s) => recordDateISO(s) === iso);
+      // Recovery, not symmetry: color by how much the affected side moves vs the frozen
+      // baseline (affectedProgressRatio). A per-rep min/max symmetry average can fall on a
+      // day the affected side actually moved MORE — it tracks instantaneous balance, not
+      // recovery. Movement-vs-baseline is the signal that rises as the patient improves.
+      const ratios = daySessions
+        .map((s) => preferredMovementProgress(s)?.affectedProgressRatio)
+        .filter((v) => v != null);
+      const dayRecovery = ratios.length > 0 ? ratios.reduce((a, b) => a + b, 0) / ratios.length : null;
+      grid.push({ date: iso, count: daySessions.length, recovery: dayRecovery });
     }
     return grid;
-  }, [practiceSessions]);
+  }, [practiceSessions, today]);
 
   return (
     <div className="space-y-6">
@@ -2541,32 +2599,34 @@ function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, o
       <div className="rounded-2xl p-5" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
         <div className="flex items-center justify-between mb-3">
           <div className="text-sm font-semibold">Last 14 days</div>
-          <div className="text-xs text-stone-500">color = avg symmetry</div>
+          <div className="text-xs text-stone-500">color = movement vs baseline</div>
         </div>
         <div className="grid gap-1.5" style={{ gridTemplateColumns: "repeat(14, 1fr)" }}>
           {activityGrid.map((day) => {
-            // No sessions: muted gray. Sessions but no symmetry data: amber dot.
-            // With symmetry: color-graded by avg score (red < 60%, amber 60–80%, green ≥ 80%).
+            // No sessions: muted gray. Sessions but no movement-progress data: amber dot.
+            // With data: color by affected-side movement vs the frozen baseline (red < 85%,
+            // amber 85–115%, green ≥ 115% of baseline) — rises as the affected side recovers.
             const bg = day.count === 0
               ? "rgba(31, 27, 22, 0.06)"
-              : day.avg == null
+              : day.recovery == null
                 ? "rgba(212, 165, 116, 0.5)"
-                : scoreColor(day.avg);
+                : recoveryColor(day.recovery);
+            const recoveryPct = day.recovery != null ? Math.round(day.recovery * 100) : null;
             const tooltip = day.count === 0
               ? `${day.date}: no sessions`
-              : day.avg != null
-                ? `${day.date}: ${day.count} session${day.count !== 1 ? "s" : ""} · ${displayPct(day.avg)}% avg`
+              : recoveryPct != null
+                ? `${day.date}: ${day.count} session${day.count !== 1 ? "s" : ""} · affected side ${recoveryPct}% of baseline`
                 : `${day.date}: ${day.count} session${day.count !== 1 ? "s" : ""}`;
             return <div key={day.date} className="aspect-square rounded-md" style={{ background: bg }} title={tooltip} />;
           })}
         </div>
         <div className="flex items-center gap-2 mt-3 text-xs text-stone-500">
-          <span>None</span>
-          <div className="w-3 h-3 rounded-sm" style={{ background: "rgba(31, 27, 22, 0.06)" }} />
-          <div className="w-3 h-3 rounded-sm" style={{ background: "#B8543A" }} title="< 60%" />
-          <div className="w-3 h-3 rounded-sm" style={{ background: "#D4A574" }} title="60–80%" />
-          <div className="w-3 h-3 rounded-sm" style={{ background: "#7A8F73" }} title="≥ 80%" />
-          <span>Symmetric</span>
+          <span>Below baseline</span>
+          <div className="w-3 h-3 rounded-sm" style={{ background: "rgba(31, 27, 22, 0.06)" }} title="no sessions" />
+          <div className="w-3 h-3 rounded-sm" style={{ background: "#B8543A" }} title="< 85% of baseline" />
+          <div className="w-3 h-3 rounded-sm" style={{ background: "#D4A574" }} title="85–115% of baseline" />
+          <div className="w-3 h-3 rounded-sm" style={{ background: "#7A8F73" }} title="≥ 115% of baseline" />
+          <span>Improving</span>
         </div>
       </div>
       <PastAssessmentsList assessments={assessments} sessions={data.sessions} onOpen={onOpenReport} showClinicalScaleEstimates={showClinicalScaleEstimates} />

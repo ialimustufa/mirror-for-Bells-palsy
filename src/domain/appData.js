@@ -2,7 +2,7 @@ import { compactAppDataForStorage } from "../storage";
 import { LEGACY_MOVEMENT_SIDE_CONVENTION, MOVEMENT_SIDE_CONVENTION, flipLeftRightSide, normalizeScoringNoiseMode, roundMetric } from "../ml/faceMetrics";
 import { EXERCISE_BY_ID } from "./exercises";
 import { normalizePersonalRecoveryModel } from "./personalRecoveryModel";
-import { DEFAULT_DATA } from "./session";
+import { DEFAULT_DATA, recordDateISO } from "./session";
 import { MAX_EXERCISE_REPEATS, MAX_EXERCISE_REPS, MIN_EXERCISE_REPS } from "./config";
 
 export const APP_SIDE_CONVENTION_VERSION = 2;
@@ -70,12 +70,25 @@ function normalizeAssessments(assessments) {
   if (!Array.isArray(assessments)) return [];
   return assessments
     .filter((assessment) => assessment && typeof assessment === "object")
-    .map((assessment) => ({
+    .map((assessment) => normalizeDatedRecord({
       ...assessment,
       zones: Array.isArray(assessment.zones) ? assessment.zones : [],
       ts: assessment.ts ?? assessment.sourceSessionTs ?? Date.now(),
     }))
     .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+}
+
+function normalizeDatedRecord(record) {
+  if (!record || typeof record !== "object") return record;
+  const date = recordDateISO(record);
+  return date && date !== record.date ? { ...record, date } : record;
+}
+
+function normalizeDatedRecords(records) {
+  if (!Array.isArray(records)) return [];
+  return records
+    .filter((record) => record && typeof record === "object")
+    .map(normalizeDatedRecord);
 }
 
 export function normalizeAppData(parsed = {}) {
@@ -92,6 +105,8 @@ export function normalizeAppData(parsed = {}) {
   return {
     ...DEFAULT_DATA,
     ...migratedParsed,
+    journal: normalizeDatedRecords(migratedParsed.journal),
+    sessions: normalizeDatedRecords(migratedParsed.sessions),
     assessments: normalizeAssessments(migratedParsed.assessments),
     movementProfileHistory,
     personalRecoveryModel: normalizePersonalRecoveryModel(migratedParsed.personalRecoveryModel),
@@ -210,6 +225,21 @@ export function needsSideConventionMigration(data = {}) {
     recordNeedsProgressSideConventionMigration(session)
     || (Array.isArray(session.scores) && session.scores.some(recordNeedsProgressSideConventionMigration))
   ));
+}
+
+function recordNeedsDateNormalization(record) {
+  const date = recordDateISO(record);
+  return Boolean(date && record?.date !== date);
+}
+
+function needsDateNormalization(data = {}) {
+  return (Array.isArray(data.sessions) && data.sessions.some(recordNeedsDateNormalization))
+    || (Array.isArray(data.journal) && data.journal.some(recordNeedsDateNormalization))
+    || (Array.isArray(data.assessments) && data.assessments.some(recordNeedsDateNormalization));
+}
+
+export function needsAppDataMigration(data = {}) {
+  return needsSideConventionMigration(data) || needsDateNormalization(data);
 }
 
 export function archiveMovementProfile(profile, archivedAt = Date.now()) {

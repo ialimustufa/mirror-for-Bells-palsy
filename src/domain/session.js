@@ -33,8 +33,84 @@ export const DEFAULT_DATA = {
   },
 };
 
-export const todayISO = () => new Date().toISOString().split("T")[0];
-export const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / (1000 * 60 * 60 * 24));
+const DAY_MS = 1000 * 60 * 60 * 24;
+const MIN_REASONABLE_RECORD_TS = Date.UTC(2020, 0, 1);
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function parseCalendarDateParts(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ""));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const localDate = new Date(year, monthIndex, day);
+  if (
+    localDate.getFullYear() !== year
+    || localDate.getMonth() !== monthIndex
+    || localDate.getDate() !== day
+  ) {
+    return null;
+  }
+  return { year, monthIndex, day };
+}
+
+function calendarDateUtcMs(value) {
+  const parts = parseCalendarDateParts(value);
+  if (parts) return Date.UTC(parts.year, parts.monthIndex, parts.day);
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return NaN;
+  return Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+}
+
+export function localDateISO(date = new Date()) {
+  const parsed = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}-${pad2(parsed.getDate())}`;
+}
+
+export function normalizeCalendarDate(value) {
+  const parts = parseCalendarDateParts(value);
+  if (!parts) return null;
+  return `${parts.year}-${pad2(parts.monthIndex + 1)}-${pad2(parts.day)}`;
+}
+
+export function dateISOFromTimestamp(ts) {
+  const value = Number(ts);
+  if (!Number.isFinite(value) || value < MIN_REASONABLE_RECORD_TS) return null;
+  return localDateISO(new Date(value));
+}
+
+export function recordDateISO(record = {}) {
+  if (!record || typeof record !== "object") return null;
+  return dateISOFromTimestamp(record.ts)
+    ?? dateISOFromTimestamp(record.sourceSessionTs)
+    ?? dateISOFromTimestamp(record.createdAt)
+    ?? normalizeCalendarDate(record.date);
+}
+
+export function addDaysISO(dateISO, days) {
+  const parts = parseCalendarDateParts(dateISO);
+  if (!parts) return null;
+  const date = new Date(parts.year, parts.monthIndex, parts.day);
+  date.setDate(date.getDate() + days);
+  return localDateISO(date);
+}
+
+export function formatCalendarDate(dateISO, options = {}) {
+  const parts = parseCalendarDateParts(dateISO);
+  if (!parts) return "";
+  return new Date(parts.year, parts.monthIndex, parts.day).toLocaleDateString(undefined, options);
+}
+
+export const todayISO = () => localDateISO(new Date());
+export const daysBetween = (a, b) => {
+  const start = calendarDateUtcMs(a);
+  const end = calendarDateUtcMs(b);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.round((end - start) / DAY_MS) : 0;
+};
 
 // Single-exercise standalone runs are tagged "practice" and standardized assessment
 // runs are tagged "assessment" — they're still saved, but don't count toward the
@@ -172,10 +248,10 @@ export function formatClock(d) {
 export const computeStreak = (sessions) => {
   const counted = sessions.filter(isCountedSession);
   if (!counted.length) return 0;
-  const dates = [...new Set(counted.map((s) => s.date))].sort().reverse();
+  const dates = [...new Set(counted.map(recordDateISO).filter(Boolean))].sort().reverse();
   let streak = 0; let cursor = todayISO();
   for (const d of dates) {
-    if (d === cursor) { streak++; const prev = new Date(cursor); prev.setDate(prev.getDate() - 1); cursor = prev.toISOString().split("T")[0]; }
+    if (d === cursor) { streak++; cursor = addDaysISO(cursor, -1); if (!cursor) break; }
     else if (daysBetween(d, cursor) > 0) break;
   }
   return streak;
