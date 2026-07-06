@@ -16,6 +16,7 @@ Mirror for Bell's Palsy is designed as a local-first practice companion. The app
 - The app uses IndexedDB under `mirror-db` for app state, sessions, and report images.
 - Older local data may be migrated from the legacy `mirror-app-data` localStorage key into IndexedDB.
 - The personal recovery model trains locally from sessions already saved on your device and is on by default; optional debug data capture (sampled landmarks and scoring metadata, never raw video) is off by default. Both can be toggled in the app's preferences.
+- Optional session reminders use your browser's local notification permission while Mirror is running. Mirror does not send reminder schedules or push subscriptions to a server.
 
 ## What Mirror Does Not Collect
 

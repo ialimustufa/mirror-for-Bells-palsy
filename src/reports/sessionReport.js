@@ -3,18 +3,18 @@ import { summarizeAssessmentSession } from "../domain/assessment";
 import { clinicalScaleInputCompletenessSummaries, clinicalScaleInputGapSummaries, clinicalScaleMovementLabels, clinicalScaleRestingEvidenceSummary } from "../domain/clinicalScales";
 import { clinicalScalePresentationPolicy, scaleNounForClinicalScale } from "../domain/clinicalScalePresentation";
 import { summarizeSessionDiagnostics } from "../domain/sessionDiagnostics";
-import { formatClock, todayISO } from "../domain/session";
+import { addDaysISO, formatCalendarDate, formatClock, recordDateISO, todayISO } from "../domain/session";
 import { baselineProgressLabel, movementBalanceLabel, movementProgressLabel, progressUsesLegacySideConvention } from "../ml/faceMetrics";
 import { displayPct, scoreColor } from "../ui/scoreFormatting";
 
 function formatSessionDate(s) {
   const today = todayISO();
-  const yest = new Date(); yest.setDate(yest.getDate() - 1);
-  const yISO = yest.toISOString().split("T")[0];
+  const yISO = addDaysISO(today, -1);
+  const date = recordDateISO(s);
   const time = s.ts ? formatClock(new Date(s.ts)) : "";
-  if (s.date === today) return `Today${time ? ` · ${time}` : ""}`;
-  if (s.date === yISO) return `Yesterday${time ? ` · ${time}` : ""}`;
-  const d = new Date(s.date).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (date === today) return `Today${time ? ` · ${time}` : ""}`;
+  if (date === yISO) return `Yesterday${time ? ` · ${time}` : ""}`;
+  const d = formatCalendarDate(date ?? s.date, { month: "short", day: "numeric" });
   return `${d}${time ? ` · ${time}` : ""}`;
 }
 

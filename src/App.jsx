@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { archiveMovementProfile, mergeMissingMovementProfileBaselines, mergeMovementProfileRetake, needsSideConventionMigration, normalizeAppData, resetMovementProfileBaselines } from "./domain/appData";
+import { archiveMovementProfile, mergeMissingMovementProfileBaselines, mergeMovementProfileRetake, needsAppDataMigration, normalizeAppData, resetMovementProfileBaselines } from "./domain/appData";
 import { PROFILE_HISTORY_LIMIT } from "./domain/config";
 import { ASSESSMENT_SESSION_KIND, appendAssessmentRecord, buildStandardAssessmentExercises, summarizeAssessmentSession } from "./domain/assessment";
 import { buildClinicianBundleRecords, createClinicianBundleExportBlob } from "./domain/clinicianBundle";
@@ -14,6 +14,7 @@ import {
   computeStreak,
   getComfortDosing,
   isCountedSession,
+  recordDateISO,
   todayISO,
 } from "./domain/session";
 import { clearAllMirrorData, compactAppDataForStorage, createMirrorBrowserDataExportBlob, deleteSessionFrameSamples, deleteSessionImages, estimateStorageUsage, exportMirrorBrowserData, hydrateSessionImages, importMirrorBrowserData, loadMirrorData, parseMirrorBrowserDataFile, saveMirrorData } from "./storage";
@@ -22,6 +23,7 @@ import { primeSpeech } from "./lib/speech";
 import { SessionMode } from "./session/SessionMode";
 import { ProfileAssessment } from "./profile/ProfileAssessment";
 import { TrialMode } from "./trial/TrialMode";
+import { useSessionReminders } from "./hooks/useSessionReminders";
 import { MadeByFooter } from "./components/MadeByFooter";
 import {
   BaselineView,
@@ -92,7 +94,7 @@ export default function App() {
       try {
         const stored = await loadMirrorData();
         if (stored) {
-          const shouldPersistMigration = needsSideConventionMigration(stored);
+          const shouldPersistMigration = needsAppDataMigration(stored);
           const normalized = withPersonalRecoveryModel(normalizeAppData(stored));
           setData(normalized);
           if (shouldPersistMigration) {
@@ -100,7 +102,7 @@ export default function App() {
               const saved = await saveMirrorData(normalized);
               setData(withPersonalRecoveryModel(normalizeAppData(saved)));
             } catch (error) {
-              console.error("Failed to persist side-convention migration", error);
+              console.error("Failed to persist app data migration", error);
             }
           }
           if (!normalized.prefs?.onboarded) setShowOnboarding(true);
@@ -302,7 +304,7 @@ export default function App() {
       await persistQueueRef.current.catch(() => {});
       const payload = await exportMirrorBrowserData();
       const blob = createMirrorBrowserDataExportBlob(payload);
-      const filename = `mirror-browser-data-${new Date().toISOString().slice(0, 10)}.jsonl`;
+      const filename = `mirror-browser-data-${todayISO()}.jsonl`;
       downloadFile(blob, filename);
       setDataTransferStatus({ kind: "success", message: `Exported ${payload.summary?.sessions ?? 0} sessions.` });
     } catch (error) {
@@ -317,7 +319,7 @@ export default function App() {
       const payload = await exportMirrorBrowserData();
       const records = buildClinicianBundleRecords(payload);
       const blob = createClinicianBundleExportBlob(records);
-      const filename = `mirror-clinician-bundle-${new Date().toISOString().slice(0, 10)}.jsonl`;
+      const filename = `mirror-clinician-bundle-${todayISO()}.jsonl`;
       downloadFile(blob, filename);
       setDataTransferStatus({ kind: "success", message: `Exported clinician bundle with ${records[0]?.summary?.sessions ?? 0} sessions.` });
     } catch (error) {
@@ -338,7 +340,7 @@ export default function App() {
         return;
       }
       const blob = createValidationDatasetExportBlob(records);
-      const filename = `mirror-validation-dataset-${new Date().toISOString().slice(0, 10)}.jsonl`;
+      const filename = `mirror-validation-dataset-${todayISO()}.jsonl`;
       downloadFile(blob, filename);
       setDataTransferStatus({ kind: "success", message: `Exported validation dataset with ${sampleCount} frame samples and ${clinicalScaleAssessmentCount} clinical-scale assessment rows.` });
     } catch (error) {
@@ -405,6 +407,32 @@ export default function App() {
     }
   }, [refreshStorageUsage]);
 
+  const openTodayFromReminder = useCallback(() => {
+    if (typeof window !== "undefined" && window.location.pathname !== "/") {
+      window.history.pushState({}, "", "/");
+      setPathname("/");
+    }
+    setView("home");
+  }, []);
+
+  const sessionReminders = useSessionReminders({
+    sessions: data.sessions,
+    dailyGoal: data.prefs.dailyGoal ?? 3,
+    enabled: !loading && pathname !== "/try" && data.prefs.sessionRemindersEnabled === true,
+    sessionActive: Boolean(session),
+    onReminderClick: openTodayFromReminder,
+  });
+
+  const toggleSessionReminders = async () => {
+    const savedEnabled = dataRef.current.prefs.sessionRemindersEnabled === true;
+    if (savedEnabled && sessionReminders.status.permission !== "default") {
+      setPref("sessionRemindersEnabled", false);
+      return;
+    }
+    const permission = await sessionReminders.requestPermission();
+    setPref("sessionRemindersEnabled", permission === "granted");
+  };
+
   if (pathname === "/try") return <TrialMode prefs={data.prefs} />;
   if (loading) return <div className="min-h-screen flex items-center justify-center" style={{ background: "#F4EFE6" }}><div className="text-stone-600">Loading…</div></div>;
 
@@ -423,14 +451,14 @@ export default function App() {
           {view === "baseline" && <BaselineView data={data} onStartProfile={openProfileAssessment} onResetBaselines={resetMovementBaselines} />}
           {view === "journal" && <JournalView entries={data.journal} onSave={saveJournal} />}
           {view === "progress" && <ProgressView data={data} streak={streak} prefs={data.prefs} onOpenReport={openStoredReport} onDeleteSession={deleteSession} />}
-          {view === "preferences" && <PreferencesView prefs={data.prefs} dataTransferStatus={dataTransferStatus} onTogglePref={togglePref} onSetPref={setPref} onExportData={exportBrowserData} onExportClinicianBundle={exportClinicianBundle} onExportValidationDataset={exportValidationDataset} onImportData={importBrowserData} storageUsage={storageUsage} onRefreshStorageUsage={refreshStorageUsage} onClearAllData={clearAllData} />}
+          {view === "preferences" && <PreferencesView prefs={data.prefs} sessionReminderStatus={sessionReminders.status} onToggleSessionReminders={toggleSessionReminders} dataTransferStatus={dataTransferStatus} onTogglePref={togglePref} onSetPref={setPref} onExportData={exportBrowserData} onExportClinicianBundle={exportClinicianBundle} onExportValidationDataset={exportValidationDataset} onImportData={importBrowserData} storageUsage={storageUsage} onRefreshStorageUsage={refreshStorageUsage} onClearAllData={clearAllData} />}
         </main>
         <footer className="mt-10 text-center text-xs text-stone-500">
           <MadeByFooter />
         </footer>
       </div>
       <BottomNav view={view} setView={setView} />
-      {session && <SessionMode session={session} prefs={data.prefs} movementProfile={data.movementProfile} initialMovementProfile={data.initialMovementProfile ?? data.movementProfile} sessionsToday={data.sessions.filter((s) => s.date === todayISO() && isCountedSession(s)).length} onComplete={completeSession} onCancel={() => setSession(null)} onTogglePref={togglePref} onRequestProfileRetake={requestProfileRetake} />}
+      {session && <SessionMode session={session} prefs={data.prefs} movementProfile={data.movementProfile} initialMovementProfile={data.initialMovementProfile ?? data.movementProfile} sessionsToday={data.sessions.filter((s) => recordDateISO(s) === todayISO() && isCountedSession(s)).length} onComplete={completeSession} onCancel={() => setSession(null)} onTogglePref={togglePref} onRequestProfileRetake={requestProfileRetake} />}
       {exerciseDetail && <ExerciseDetail exercise={exerciseDetail} movementProfile={data.movementProfile} onClose={() => setExerciseDetail(null)} onStart={(id) => { setExerciseDetail(null); startSession([id]); }} />}
       {showOnboarding && <Onboarding onDone={finishOnboarding} dailyGoal={data.prefs.dailyGoal} onSetDailyGoal={(n) => setPref("dailyGoal", n)} voiceEnabled={data.prefs.voiceEnabled} onToggleVoice={() => togglePref("voiceEnabled")} />}
       {profileAssessment && <ProfileAssessment existingProfile={data.movementProfile} retakeExerciseIds={profileAssessment.retakeExerciseIds} prefs={data.prefs} onTogglePref={togglePref} onComplete={saveMovementProfile} onSkip={() => setProfileAssessment(null)} />}

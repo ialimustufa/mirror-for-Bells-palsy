@@ -136,3 +136,24 @@ test("water hold quality drops when target-side seal opens", () => {
   assert.ok(leakingScore);
   assert.ok(leakingScore.symmetry < cleanScore.symmetry);
 });
+
+test("a scored water hold is floored at 50% so it does not drag the session average", () => {
+  const neutral = makeNeutralFace();
+  // A poor but real hold: target side moves, but the opposite side moves heavily and the seal
+  // leaks — raw quality target/(target+penalty) lands well below 0.5. The floor keeps a scored
+  // hold at >= 50% (a one-sided isolation is not a left/right symmetry), while a clean hold still
+  // scores higher, preserving the ordering.
+  const poor = cloneLandmarks(neutral);
+  moveGroup(poor, RIGHT_WATER, 0.006, 0);
+  moveGroup(poor, LEFT_WATER, -0.006, 0);
+  moveGroup(poor, [321, 375, 318, 402], 0, 0.08);
+  const clean = cloneLandmarks(neutral);
+  moveGroup(clean, RIGHT_WATER, 0.006, 0);
+
+  const poorScore = computeExerciseSymmetry("water-hold-left", poor, neutral);
+  const cleanScore = computeExerciseSymmetry("water-hold-left", clean, neutral);
+  assert.ok(poorScore && cleanScore);
+  assert.ok(poorScore.symmetry >= 0.5, "a scored hold is floored at 50%");
+  assert.ok(poorScore.symmetry < cleanScore.symmetry, "a poor hold still scores below a clean one");
+  assert.ok(cleanScore.symmetry <= 1, "a clean hold stays within 100%");
+});
