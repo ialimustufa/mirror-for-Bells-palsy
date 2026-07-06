@@ -241,11 +241,13 @@ test("normalizes scoring noise prefs with safe defaults", () => {
   assert.equal(defaults.prefs.scoringNoiseMode, "normal");
   assert.equal(defaults.prefs.scoringDiagnosticsEnabled, false);
   assert.equal(defaults.prefs.clinicalScaleEstimatesEnabled, true);
+  assert.equal(defaults.prefs.symmetryEnabled, true);
 
-  const raw = normalizeAppData({ prefs: { scoringNoiseMode: "raw", scoringDiagnosticsEnabled: true, clinicalScaleEstimatesEnabled: false } });
+  const raw = normalizeAppData({ prefs: { scoringNoiseMode: "raw", scoringDiagnosticsEnabled: true, clinicalScaleEstimatesEnabled: false, symmetryEnabled: false } });
   assert.equal(raw.prefs.scoringNoiseMode, "raw");
   assert.equal(raw.prefs.scoringDiagnosticsEnabled, true);
   assert.equal(raw.prefs.clinicalScaleEstimatesEnabled, false);
+  assert.equal(raw.prefs.symmetryEnabled, true);
 
   const invalid = normalizeAppData({ prefs: { scoringNoiseMode: "loud", scoringDiagnosticsEnabled: "true", clinicalScaleEstimatesEnabled: "false" } });
   assert.equal(invalid.prefs.scoringNoiseMode, "normal");

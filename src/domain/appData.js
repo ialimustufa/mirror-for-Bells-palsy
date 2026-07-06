@@ -97,6 +97,7 @@ export function normalizeAppData(parsed = {}) {
     personalRecoveryModel: normalizePersonalRecoveryModel(migratedParsed.personalRecoveryModel),
     prefs: {
       ...prefs,
+      symmetryEnabled: true,
       personalModelEnabled: prefs.personalModelEnabled !== false,
       clinicalScaleEstimatesEnabled: prefs.clinicalScaleEstimatesEnabled !== false,
       dataCaptureEnabled: prefs.dataCaptureEnabled === true,
