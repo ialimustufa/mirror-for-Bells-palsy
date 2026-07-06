@@ -27,6 +27,7 @@ function XGlyph({ className = "w-3.5 h-3.5" }) {
 import { CALIBRATION_FRAMES, CALIBRATION_RESET_EPS } from "../domain/config";
 import { useCameraStream } from "../hooks/useCameraStream";
 import { useFaceLandmarker } from "../hooks/useFaceLandmarker";
+import { CameraSetupStatusPanel } from "../components/appViews";
 import { MadeByFooter } from "../components/MadeByFooter";
 import {
   averageBlendshapes,
@@ -335,6 +336,7 @@ function drawActivationGlow(canvas, video, lm, bsMap) {
 
 function TrialMode({ prefs = {} }) {
   const [cameraOn, setCameraOn] = useState(true);
+  const [cameraRetryKey, setCameraRetryKey] = useState(0);
   const [showSupportHeader, setShowSupportHeader] = useState(true);
   const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [calibrationStatus, setCalibrationStatus] = useState("Center your face to begin");
@@ -344,8 +346,9 @@ function TrialMode({ prefs = {} }) {
   const [blendshapeMap, setBlendshapeMap] = useState({});
   const [fps, setFps] = useState(null);
 
-  const { stream, cameraError } = useCameraStream(cameraOn);
-  const { faceLandmarker, latestRef, status: trackerStatus } = useFaceLandmarker(cameraOn);
+  const { stream, cameraError } = useCameraStream(cameraOn, cameraRetryKey);
+  const { faceLandmarker, latestRef, status: trackerStatus, trackerError } = useFaceLandmarker(cameraOn, cameraRetryKey);
+  const cameraSetupReady = Boolean(cameraOn && stream && !cameraError && trackerStatus === "ready" && faceLandmarker);
   const scoringNoiseMode = normalizeScoringNoiseMode(prefs?.scoringNoiseMode);
   const scoringDiagnosticsEnabled = prefs?.scoringDiagnosticsEnabled === true;
 
@@ -381,6 +384,17 @@ function TrialMode({ prefs = {} }) {
     setCalibrated(false);
     setCalibrationProgress(0);
     setCalibrationStatus("Center your face and hold a relaxed neutral pose");
+  };
+
+  const retryCameraSetup = () => {
+    resetCalibration();
+    latestRef.current = null;
+    setAligned(false);
+    setHeadPoseDeg(null);
+    setBlendshapeMap({});
+    setFps(null);
+    if (!cameraOn) setCameraOn(true);
+    setCameraRetryKey((key) => key + 1);
   };
 
   // Detection + overlay loop. Mirrors SessionMode's pattern but skips phase machinery:
@@ -547,10 +561,39 @@ function TrialMode({ prefs = {} }) {
               </>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-center px-6">
+                {cameraOn && cameraError ? (
+                  <CameraSetupStatusPanel
+                    cameraEnabled={cameraOn}
+                    trackingEnabled={cameraOn}
+                    stream={stream}
+                    cameraError={cameraError}
+                    trackerStatus={trackerStatus}
+                    trackerError={trackerError}
+                    faceLandmarker={faceLandmarker}
+                    onRetry={retryCameraSetup}
+                    className="max-w-sm"
+                  />
+                ) : (
                 <div className="opacity-70">
                   <CameraOff className="w-10 h-10 mx-auto mb-3" />
                   <div className="text-sm">{cameraError ?? "Camera off"}</div>
                 </div>
+                )}
+              </div>
+            )}
+
+            {cameraOn && !cameraSetupReady && !cameraError && (
+              <div className="absolute left-4 right-20 top-4">
+                <CameraSetupStatusPanel
+                  cameraEnabled={cameraOn}
+                  trackingEnabled={cameraOn}
+                  stream={stream}
+                  cameraError={cameraError}
+                  trackerStatus={trackerStatus}
+                  trackerError={trackerError}
+                  faceLandmarker={faceLandmarker}
+                  onRetry={retryCameraSetup}
+                />
               </div>
             )}
 

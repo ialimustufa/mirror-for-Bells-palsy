@@ -112,11 +112,13 @@ export function normalizeAppData(parsed = {}) {
     personalRecoveryModel: normalizePersonalRecoveryModel(migratedParsed.personalRecoveryModel),
     prefs: {
       ...prefs,
+      symmetryEnabled: true,
       personalModelEnabled: prefs.personalModelEnabled !== false,
       clinicalScaleEstimatesEnabled: prefs.clinicalScaleEstimatesEnabled !== false,
       dataCaptureEnabled: prefs.dataCaptureEnabled === true,
       scoringNoiseMode: normalizeScoringNoiseMode(prefs.scoringNoiseMode),
       scoringDiagnosticsEnabled: prefs.scoringDiagnosticsEnabled === true,
+      sessionRemindersEnabled: prefs.sessionRemindersEnabled === true,
       personalPlan: normalizePersonalPlan(prefs.personalPlan),
     },
   };

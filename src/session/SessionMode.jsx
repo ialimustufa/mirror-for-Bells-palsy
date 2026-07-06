@@ -7,7 +7,7 @@ import { exerciseHoldSec, exercisePlannedSec, exerciseRestSec, todayISO } from "
 import { flushSpeech, primeSpeech, speak } from "../lib/speech";
 import { useCameraStream } from "../hooks/useCameraStream";
 import { useFaceLandmarker } from "../hooks/useFaceLandmarker";
-import { InterstitialView, PreviewView, RealtimeFeedback, SessionSummary, TrackerStatusPill } from "../components/appViews";
+import { CameraSetupStatusPanel, InterstitialView, PreviewView, RealtimeFeedback, SessionSummary, TrackerStatusPill } from "../components/appViews";
 import { BROW_EXERCISES, EXERCISE_BLENDSHAPES, NOSE_EXERCISES, SCORE_DROP_REASONS, SCORING_MODEL_VERSION, averageBlendshapes, averageFacialTransformationMatrix, averageLandmarks, bsActivation, calibrationPrompt, captureSnapshot, computeBaselineProgress, computeBaselineProgressFromDisplacements, computeExerciseSymmetryDiagnostic, computeMovementProgressFromDisplacements, computeNoiseFloor, computeQuietRegionCoactivation, createLiveScoreStabilizer, drawOverlay, effectiveProfileThreshold, profileLiveScoringThreshold, faceAlignmentFeedback, firstFacialTransformationMatrix, getProfileExercise, normalizeScoringNoiseMode, normalizedFrameDelta, smoothFacialTransformationMatrix, smoothLandmarks, summarizeBaselineProgress, summarizeMovementProgress, summarizeRestingAsymmetry, summarizeSessionBaselineProgress, summarizeSessionMovementProgress } from "../ml/faceMetrics";
 
 const TRACKING_ISSUES = {
@@ -84,6 +84,9 @@ function logScoringSessionDebug(reason, payload = {}, scoringOptions = {}) {
 function compactNumber(value, digits = 5) {
   return Number.isFinite(value) ? Number(value.toFixed(digits)) : null;
 }
+
+// Minimum spacing between persisted capture frames (~5fps).
+const FRAME_SAMPLE_INTERVAL_MS = 200;
 
 function addReasonCount(counts = {}, reason) {
   if (!reason) return counts;
@@ -178,10 +181,12 @@ function summarizeCoactivation(samples = []) {
 
 function compactLandmarksForCapture(landmarks) {
   if (!Array.isArray(landmarks)) return null;
+  // 4 decimals ≈ 0.0001 of the normalized frame — well below landmark noise, and
+  // ~20% smaller than 5 decimals before gzip.
   return landmarks.map((point) => point ? {
-    x: compactNumber(point.x),
-    y: compactNumber(point.y),
-    z: compactNumber(point.z ?? 0),
+    x: compactNumber(point.x, 4),
+    y: compactNumber(point.y, 4),
+    z: compactNumber(point.z ?? 0, 4),
   } : null);
 }
 
@@ -562,11 +567,12 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
   // were 0, the advance effect would short-circuit out before phase-mount could update it.
   const [secondsLeft, setSecondsLeft] = useState(null);
   const [paused, setPaused] = useState(false);
+  const [cameraRetryKey, setCameraRetryKey] = useState(0);
   // Distinguishes the entry rest (no preceding hold) from the post-hold rest. Reset to true
   // on each exercise change.
   const restIsEntryRef = useRef(true);
 
-  const { stream, cameraError } = useCameraStream(prefs.mirrorEnabled);
+  const { stream, cameraError } = useCameraStream(prefs.mirrorEnabled, cameraRetryKey);
   const videoRef = useRef(null);
   const overlayRef = useRef(null);
   const snapshotCanvasRef = useRef(null);
@@ -575,7 +581,8 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
   const symEnabled = prefs.symmetryEnabled && prefs.mirrorEnabled;
   const scoringNoiseMode = normalizeScoringNoiseMode(prefs.scoringNoiseMode);
   const scoringDiagnosticsEnabled = prefs.scoringDiagnosticsEnabled === true;
-  const { faceLandmarker, latestRef, status: trackerStatus } = useFaceLandmarker(symEnabled);
+  const { faceLandmarker, latestRef, status: trackerStatus, trackerError } = useFaceLandmarker(symEnabled, cameraRetryKey);
+  const cameraSetupReady = Boolean(symEnabled && stream && !cameraError && trackerStatus === "ready" && faceLandmarker);
 
   const calibBufferRef = useRef([]);
   const calibBsBufferRef = useRef([]);
@@ -655,7 +662,9 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
   const captureFrameSample = useCallback((sample) => {
     if (!dataCaptureEnabled) return;
     const now = Date.now();
-    if (now - lastFrameSampleAtRef.current < 100) return;
+    // ~5fps: enough temporal resolution for symmetry/movement labeling while
+    // halving the stored sample count versus the previous 10fps.
+    if (now - lastFrameSampleAtRef.current < FRAME_SAMPLE_INTERVAL_MS) return;
     lastFrameSampleAtRef.current = now;
     frameSamplesRef.current.push({
       exerciseId: current.id,
@@ -707,11 +716,11 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
 
   useEffect(() => {
     if (phase !== "calibrate" && phase !== "setup") return;
-    if (!symEnabled || cameraError || trackerStatus === "error") {
+    if (!symEnabled) {
       setPhase("preview");
       setSecondsLeft(null);
     }
-  }, [phase, symEnabled, cameraError, trackerStatus]);
+  }, [phase, symEnabled]);
 
   // Phase entry: set the timer and announce the phase.
   useEffect(() => {
@@ -1128,10 +1137,11 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
           captureFrameSample({
             aligned,
             alignmentIssue: alignment.issue,
-            rawLandmarks: compactLandmarksForCapture(rawLm),
+            // Raw (pre-normalization) landmarks/matrix are omitted: they roughly
+            // double the per-frame payload and downstream consumers fall back to
+            // the processed `landmarks`/`facialTransformationMatrix`.
             landmarks: compactLandmarksForCapture(lm),
             blendshapes: compactBlendshapesForCapture(bsMap),
-            rawFacialTransformationMatrix: compactMatrixForCapture(rawMatrix),
             facialTransformationMatrix: compactMatrixForCapture(facialTransformationMatrix),
             scoring: captureScoring,
           });
@@ -1157,10 +1167,8 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
             captureFrameSample({
               aligned: false,
               alignmentIssue: SCORE_DROP_REASONS.noFace,
-              rawLandmarks: null,
               landmarks: null,
               blendshapes: null,
-              rawFacialTransformationMatrix: compactMatrixForCapture(rawMatrix),
               facialTransformationMatrix: null,
               scoring: {
                 scoringModelVersion: SCORING_MODEL_VERSION,
@@ -1261,7 +1269,28 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
     setSecondsLeft(null);
   };
 
+  const retryCameraSetup = () => {
+    flushSpeech();
+    setTrackingIssue(null);
+    setPostureAligned(false);
+    setCameraRetryKey((key) => key + 1);
+    if (prefs.symmetryEnabled && prefs.mirrorEnabled) {
+      calibBufferRef.current = [];
+      calibBsBufferRef.current = [];
+      calibMatrixBufferRef.current = [];
+      neutralRef.current = null;
+      noiseRef.current = null;
+      neutralBsRef.current = null;
+      neutralMatrixRef.current = null;
+      setCalibrationProgress(0);
+      setCalibrationStatus("Preparing tracker");
+      setPhase("setup");
+      setSecondsLeft(null);
+    }
+  };
+
   const beginCalibrationFromSetup = () => {
+    if (!cameraSetupReady) return;
     flushSpeech();
     setPhase("calibrate");
     setSecondsLeft(null);
@@ -1339,6 +1368,10 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
         faceLandmarker={faceLandmarker}
         mirrorEnabled={prefs.mirrorEnabled}
         cameraError={cameraError}
+        trackerStatus={trackerStatus}
+        trackerError={trackerError}
+        trackingEnabled={prefs.symmetryEnabled}
+        onRetryCameraSetup={retryCameraSetup}
       />
     );
   }
@@ -1443,7 +1476,36 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
           </div>
         )}
 
-        {phase === "setup" && <SetupQualityPanel summary={setupQuality} />}
+        {phase === "setup" && (cameraSetupReady ? (
+          <SetupQualityPanel summary={setupQuality} />
+        ) : (
+          <div className="absolute left-4 right-4 bottom-4">
+            <CameraSetupStatusPanel
+              cameraEnabled={prefs.mirrorEnabled}
+              trackingEnabled={prefs.symmetryEnabled}
+              stream={stream}
+              cameraError={cameraError}
+              trackerStatus={trackerStatus}
+              trackerError={trackerError}
+              faceLandmarker={faceLandmarker}
+              onRetry={retryCameraSetup}
+            />
+          </div>
+        ))}
+        {phase === "calibrate" && !cameraSetupReady && (
+          <div className="absolute left-4 right-4 bottom-4">
+            <CameraSetupStatusPanel
+              cameraEnabled={prefs.mirrorEnabled}
+              trackingEnabled={prefs.symmetryEnabled}
+              stream={stream}
+              cameraError={cameraError}
+              trackerStatus={trackerStatus}
+              trackerError={trackerError}
+              faceLandmarker={faceLandmarker}
+              onRetry={retryCameraSetup}
+            />
+          </div>
+        )}
 
         <div className="absolute top-4 right-[60px] flex flex-col items-end gap-2">
           <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap" style={{ background: "rgba(31, 27, 22, 0.7)", color: "#F4EFE6" }}>
@@ -1482,7 +1544,7 @@ function SessionMode({ session, prefs, movementProfile, initialMovementProfile, 
             {paused ? <Play className="w-4 h-4 fill-current" /> : <Pause className="w-4 h-4" />}{paused ? "Resume" : "Pause"}
           </button>
           <div className="flex-1 flex flex-col items-stretch gap-1.5">
-            <button onClick={phase === "setup" ? beginCalibrationFromSetup : phase === "calibrate" ? skipCalibration : handleSkipExercise} className="rounded-full py-3 flex items-center justify-center gap-2 font-semibold" style={{ background: "#B8543A", color: "#F4EFE6" }}>{phase === "setup" ? "Continue" : phase === "calibrate" ? "Start unscored" : "Skip"}<ChevronRight className="w-4 h-4" /></button>
+            <button disabled={phase === "setup" && !cameraSetupReady} onClick={phase === "setup" ? beginCalibrationFromSetup : phase === "calibrate" ? skipCalibration : handleSkipExercise} className="rounded-full py-3 flex items-center justify-center gap-2 font-semibold disabled:opacity-45 disabled:cursor-not-allowed" style={{ background: "#B8543A", color: "#F4EFE6" }}>{phase === "setup" ? "Continue" : phase === "calibrate" ? "Start unscored" : "Skip"}<ChevronRight className="w-4 h-4" /></button>
             {phase === "setup" && (
               <button onClick={skipCalibration} className="self-center text-xs font-semibold underline-offset-4 hover:underline" style={{ color: "rgba(244, 239, 230, 0.74)" }}>
                 Start unscored

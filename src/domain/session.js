@@ -27,6 +27,7 @@ export const DEFAULT_DATA = {
     dataCaptureEnabled: false,
     scoringNoiseMode: "normal",
     scoringDiagnosticsEnabled: false,
+    sessionRemindersEnabled: false,
     dailyGoal: 3,
     onboarded: false,
     personalPlan: DEFAULT_PERSONAL_PLAN,
@@ -217,7 +218,7 @@ export function canPromptRetakeAfterRep(repIdx, totalReps) {
 }
 
 // Evenly-spaced session times today (e.g. dailyGoal=5 -> 9:00, 12:00, 15:00, 18:00, 21:00).
-export function todaysSessionSlots(dailyGoal) {
+export function todaysSessionSlots(dailyGoal, baseDate = new Date()) {
   if (!dailyGoal || dailyGoal <= 0) return [];
   const minutes = (DAY_END_HOUR - DAY_START_HOUR) * 60;
   const step = dailyGoal === 1 ? 0 : minutes / (dailyGoal - 1);
@@ -225,15 +226,15 @@ export function todaysSessionSlots(dailyGoal) {
   for (let i = 0; i < dailyGoal; i++) {
     const total = DAY_START_HOUR * 60 + step * i;
     const h = Math.floor(total / 60), m = Math.round(total % 60);
-    const d = new Date(); d.setHours(h, m, 0, 0);
+    const d = new Date(baseDate); d.setHours(h, m, 0, 0);
     slots.push(d);
   }
   return slots;
 }
 
-export function nextSessionAt(dailyGoal, completedToday) {
+export function nextSessionAt(dailyGoal, completedToday, baseDate = new Date()) {
   if (completedToday >= dailyGoal) return null;
-  const slots = todaysSessionSlots(dailyGoal);
+  const slots = todaysSessionSlots(dailyGoal, baseDate);
   return slots[completedToday] ?? null;
 }
 

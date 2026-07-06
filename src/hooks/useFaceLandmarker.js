@@ -136,15 +136,31 @@ async function createFaceLandmarkerService() {
   };
 }
 
-function useFaceLandmarker(active) {
+function useFaceLandmarker(active, retryKey = 0) {
   const [status, setStatus] = useState("idle");
   const [faceLandmarker, setFaceLandmarker] = useState(null);
+  const [trackerError, setTrackerError] = useState(null);
   const detectorRef = useRef(null);
   const latestRef = useRef(null); // { landmarks, blendshapes, facialTransformationMatrix }
 
   useEffect(() => {
-    if (!active || detectorRef.current) return;
     let cancelled = false;
+    const closeCurrentDetector = () => {
+      try { detectorRef.current?.close?.(); } catch { /* best-effort model cleanup */ }
+      detectorRef.current = null;
+      latestRef.current = null;
+      setFaceLandmarker(null);
+    };
+
+    if (!active) {
+      closeCurrentDetector();
+      setTrackerError(null);
+      setStatus("idle");
+      return undefined;
+    }
+
+    closeCurrentDetector();
+    setTrackerError(null);
     setStatus("loading");
     (async () => {
       try {
@@ -155,21 +171,28 @@ function useFaceLandmarker(active) {
         setStatus("ready");
       } catch (err) {
         console.warn("[Mirror] FaceLandmarker init failed:", err);
-        if (!cancelled) setStatus("error");
+        if (!cancelled) {
+          setTrackerError(err?.message || "Tracker unavailable");
+          setStatus("error");
+        }
       }
     })();
-    return () => { cancelled = true; };
-  }, [active]);
+    return () => {
+      cancelled = true;
+      closeCurrentDetector();
+    };
+  }, [active, retryKey]);
 
   useEffect(() => {
     return () => {
       try { detectorRef.current?.close?.(); } catch { /* best-effort model cleanup */ }
       detectorRef.current = null;
       setFaceLandmarker(null);
+      latestRef.current = null;
     };
   }, []);
 
-  return { faceLandmarker, latestRef, status };
+  return { faceLandmarker, latestRef, status, trackerError };
 }
 
 export { useFaceLandmarker };

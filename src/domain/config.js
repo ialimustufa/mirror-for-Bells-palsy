@@ -38,8 +38,14 @@ export const PROFILE_HISTORY_LIMIT = 6;
 export const PROFILE_STEADY_NOISE_MAX = 0.006;
 export const PROFILE_USABLE_NOISE_MAX = 0.018;
 
-export const REPORT_SNAPSHOT_WIDTH = 520;
-export const REPORT_SNAPSHOT_QUALITY = 0.9;
+export const REPORT_SNAPSHOT_WIDTH = 400;
+export const REPORT_SNAPSHOT_QUALITY = 0.75;
+
+// Cap how many past sessions keep their heavy media (report images + captured
+// frame samples). Older sessions keep their compact score records — which drive
+// progress charts and the recovery model — but shed their blobs so local storage
+// cannot grow without bound. Scores are never dropped by retention.
+export const MEDIA_RETENTION_SESSIONS = 12;
 
 export const COMFORT_DOSING = {
   gentle: { key: "gentle", label: "Gentle", repScale: 0.65, minReps: 3, maxReps: 8, holdDeltaSec: -1, minHoldSec: 2, maxHoldSec: 4, restSec: 3 },

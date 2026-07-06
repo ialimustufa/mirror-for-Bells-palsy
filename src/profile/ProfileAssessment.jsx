@@ -6,7 +6,7 @@ import { EXERCISE_BY_ID, PROFILE_ASSESSMENT_EXERCISES, PROFILE_STARTER_ASSESSMEN
 import { flushSpeech, primeSpeech, speak } from "../lib/speech";
 import { useCameraStream } from "../hooks/useCameraStream";
 import { useFaceLandmarker } from "../hooks/useFaceLandmarker";
-import { ExerciseAnimation, ExerciseGlyph, LiveExercisePreview, RealtimeFeedback, TrackerStatusPill } from "../components/appViews";
+import { CameraSetupStatusPanel, ExerciseAnimation, ExerciseGlyph, LiveExercisePreview, RealtimeFeedback, TrackerStatusPill } from "../components/appViews";
 import { displayPct, scoreColor } from "../ui/scoreFormatting";
 import { averageBlendshapes, averageFacialTransformationMatrix, averageLandmarks, buildMovementProfile, calibrationPrompt, computeExerciseSymmetry, computeNoiseFloor, createLiveScoreStabilizer, drawOverlay, exerciseBaselineQuality, faceAlignmentFeedback, firstFacialTransformationMatrix, inferLimitedSide, normalizeScoringNoiseMode, normalizedFrameDelta, robustMovementWindow, smoothFacialTransformationMatrix, smoothLandmarks } from "../ml/faceMetrics";
 
@@ -189,6 +189,7 @@ function ProfileAssessment({ existingProfile, retakeExerciseIds, prefs, onToggle
   const saveLabel = isCompletionRetake ? "Save additions" : isPartialRetake ? "Save retake" : "Save profile";
   const [phase, setPhase] = useState("intro");
   const [showHelp, setShowHelp] = useState(false);
+  const [cameraRetryKey, setCameraRetryKey] = useState(0);
   const [affectedSide, setAffectedSide] = useState("unsure");
   const [comfortLevel, setComfortLevel] = useState("gentle");
   const [exIdx, setExIdx] = useState(0);
@@ -226,9 +227,10 @@ function ProfileAssessment({ existingProfile, retakeExerciseIds, prefs, onToggle
   const statRef = useRef(emptyAssessmentFrameStats());
   const liveScoreStabilizerRef = useRef(createLiveScoreStabilizer());
   const activeCamera = phase !== "intro" && phase !== "summary";
-  const { stream, cameraError } = useCameraStream(activeCamera);
-  const { faceLandmarker, latestRef, status: trackerStatus } = useFaceLandmarker(activeCamera);
+  const { stream, cameraError } = useCameraStream(activeCamera, cameraRetryKey);
+  const { faceLandmarker, latestRef, status: trackerStatus, trackerError } = useFaceLandmarker(activeCamera, cameraRetryKey);
   const current = exercises[exIdx] ?? exercises[0];
+  const cameraSetupReady = Boolean(activeCamera && stream && !cameraError && trackerStatus === "ready" && faceLandmarker);
   const scoredStats = exerciseStats.map((s) => s.symAvg).filter((v) => v != null);
   const summaryAvg = scoredStats.length ? scoredStats.reduce((sum, v) => sum + v, 0) / scoredStats.length : null;
   const retakeCount = exerciseStats.filter((s) => s.quality?.key === "retake").length;
@@ -528,8 +530,30 @@ function ProfileAssessment({ existingProfile, retakeExerciseIds, prefs, onToggle
   };
 
   const beginCalibrationFromSetup = () => {
+    if (!cameraSetupReady) return;
     flushSpeech();
     setPhase("calibrate");
+  };
+
+  const retryCameraSetup = () => {
+    flushSpeech();
+    setPostureAligned(false);
+    setLiveScore(null);
+    setLiveBalance(null);
+    neutralRef.current = null;
+    noiseRef.current = null;
+    neutralBsRef.current = null;
+    neutralMatrixRef.current = null;
+    calibBufferRef.current = [];
+    calibBsBufferRef.current = [];
+    calibMatrixBufferRef.current = [];
+    restBufferRef.current = [];
+    restBsBufferRef.current = [];
+    restMatrixBufferRef.current = [];
+    setCalibrationProgress(0);
+    setCalibrationStatus("Preparing tracker");
+    setCameraRetryKey((key) => key + 1);
+    setPhase("setup");
   };
 
   const handleToggleVoice = () => {
@@ -681,7 +705,7 @@ function ProfileAssessment({ existingProfile, retakeExerciseIds, prefs, onToggle
   }
 
   if (phase === "preview") {
-    const useLivePreview = stream && faceLandmarker && !cameraError;
+    const useLivePreview = cameraSetupReady;
     return (
       <div className="fixed inset-0 z-[60] flex items-stretch lg:items-center lg:justify-center lg:p-6" style={{ background: "rgba(12,10,8,0.92)" }}>
         <div className="flex flex-col w-full h-full lg:w-[440px] lg:h-[860px] lg:max-h-[92vh] lg:rounded-3xl lg:overflow-hidden lg:shadow-2xl" style={{ background: "#1F1B16", color: "#F4EFE6" }}>
@@ -706,9 +730,23 @@ function ProfileAssessment({ existingProfile, retakeExerciseIds, prefs, onToggle
             {current.tip && (
               <div className="text-xs leading-relaxed opacity-60 max-w-xs mb-4" style={{ fontStyle: "italic" }}>{current.tip}</div>
             )}
+            {!useLivePreview && (
+              <CameraSetupStatusPanel
+                cameraEnabled={activeCamera}
+                trackingEnabled={activeCamera}
+                stream={stream}
+                cameraError={cameraError}
+                trackerStatus={trackerStatus}
+                trackerError={trackerError}
+                faceLandmarker={faceLandmarker}
+                onRetry={retryCameraSetup}
+                retryLabel="Retry camera setup"
+                className="w-full max-w-xs mb-4"
+              />
+            )}
           </div>
           <div className="p-4 shrink-0" style={{ borderTop: "1px solid rgba(244,239,230,0.08)" }}>
-            <button onClick={() => { setPhase("rest"); setSecondsLeft(PROFILE_REST_SEC); }} className="w-full rounded-full px-6 py-4 font-semibold flex items-center justify-center gap-2 text-base" style={{ background: "#B8543A", color: "#F4EFE6" }}>
+            <button disabled={!cameraSetupReady} onClick={() => { setPhase("rest"); setSecondsLeft(PROFILE_REST_SEC); }} className="w-full rounded-full px-6 py-4 font-semibold flex items-center justify-center gap-2 text-base disabled:opacity-45 disabled:cursor-not-allowed" style={{ background: "#B8543A", color: "#F4EFE6" }}>
               I'm ready<ChevronRight className="w-4 h-4" />
             </button>
           </div>
@@ -802,7 +840,36 @@ function ProfileAssessment({ existingProfile, retakeExerciseIds, prefs, onToggle
             <div className="absolute top-4 right-4"><RealtimeFeedback symmetry={liveScore} balance={liveBalance} /></div>
           )}
 
-          {phase === "setup" && <BaselineSetupQualityPanel summary={setupQuality} />}
+          {phase === "setup" && (cameraSetupReady ? (
+            <BaselineSetupQualityPanel summary={setupQuality} />
+          ) : (
+            <div className="absolute left-4 right-4 bottom-4">
+              <CameraSetupStatusPanel
+                cameraEnabled={activeCamera}
+                trackingEnabled={activeCamera}
+                stream={stream}
+                cameraError={cameraError}
+                trackerStatus={trackerStatus}
+                trackerError={trackerError}
+                faceLandmarker={faceLandmarker}
+                onRetry={retryCameraSetup}
+              />
+            </div>
+          ))}
+          {phase === "calibrate" && !cameraSetupReady && (
+            <div className="absolute left-4 right-4 bottom-4">
+              <CameraSetupStatusPanel
+                cameraEnabled={activeCamera}
+                trackingEnabled={activeCamera}
+                stream={stream}
+                cameraError={cameraError}
+                trackerStatus={trackerStatus}
+                trackerError={trackerError}
+                faceLandmarker={faceLandmarker}
+                onRetry={retryCameraSetup}
+              />
+            </div>
+          )}
 
           {autoPaused && (
             <div className="absolute inset-0 flex items-center justify-center p-6 pointer-events-none">
@@ -827,7 +894,7 @@ function ProfileAssessment({ existingProfile, retakeExerciseIds, prefs, onToggle
 
         {phase === "setup" && (
           <div className="p-4 shrink-0" style={{ borderTop: `2px solid ${phaseTone.color}` }}>
-            <button onClick={beginCalibrationFromSetup} className="w-full rounded-full px-6 py-4 font-semibold flex items-center justify-center gap-2 text-base" style={{ background: "#B8543A", color: "#F4EFE6" }}>
+            <button disabled={!cameraSetupReady} onClick={beginCalibrationFromSetup} className="w-full rounded-full px-6 py-4 font-semibold flex items-center justify-center gap-2 text-base disabled:opacity-45 disabled:cursor-not-allowed" style={{ background: "#B8543A", color: "#F4EFE6" }}>
               Continue<ChevronRight className="w-4 h-4" />
             </button>
           </div>

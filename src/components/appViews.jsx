@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Home, Sparkles, BookOpen, TrendingUp, Play, X, ChevronLeft, ChevronRight, Eye, Flame, Check, Heart, Info, ArrowRight, Loader2, Volume2, VolumeX, Zap, AlertCircle, Share2, Trash2, Save, RotateCcw, Plus, Minus, Download, Upload } from "lucide-react";
+import { Home, Sparkles, BookOpen, TrendingUp, Play, X, ChevronLeft, ChevronRight, Eye, Flame, Check, Heart, Info, ArrowRight, Loader2, Volume2, VolumeX, Zap, AlertCircle, CameraOff, Share2, Trash2, Save, RotateCcw, Plus, Minus, Download, Upload, Settings } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import { DAY_END_HOUR, DAY_START_HOUR, INTERSTITIAL_SEC, MAX_EXERCISE_REPEATS, MAX_EXERCISE_REPS, MIN_EXERCISE_REPS, PROFILE_HOLD_SEC, PROFILE_REST_SEC } from "../domain/config";
 import { STANDARD_ASSESSMENT_EXERCISE_IDS, STANDARD_ASSESSMENT_REPS, STANDARD_ASSESSMENT_REST_SEC, summarizeAssessmentSession } from "../domain/assessment";
@@ -21,6 +21,7 @@ const NAV_ITEMS = [
   { key: "baseline", label: "Baseline", icon: Zap },
   { key: "journal", label: "Journal", icon: BookOpen },
   { key: "progress", label: "Progress", icon: TrendingUp },
+  { key: "preferences", label: "Preferences", shortLabel: "Prefs", icon: Settings },
 ];
 
 const EMPTY_COUNTS = Object.freeze({});
@@ -38,9 +39,12 @@ const SCORING_NOISE_MODE_DESCRIPTIONS = {
 };
 
 const PAST_SESSIONS_PAGE_SIZE = 5;
+const PAST_ASSESSMENTS_PAGE_SIZE = 5;
+const PAST_JOURNAL_PAGE_SIZE = 5;
+const DEFAULT_OPEN_REGION_KEYS = REGIONS.filter((region) => region.key !== "all").map((region) => region.key);
 
 function Header({ view, streak }) {
-  const titles = { home: "Today", practice: "Practice", baseline: "Baseline", journal: "Journal", progress: "Progress" };
+  const titles = { home: "Today", practice: "Practice", baseline: "Baseline", journal: "Journal", progress: "Progress", preferences: "Preferences" };
   return (
     <header className="flex items-center justify-between lg:hidden">
       <div className="flex items-center gap-2">
@@ -94,6 +98,16 @@ function sameExerciseSet(a = [], b = []) {
   if (a.length !== b.length) return false;
   const bSet = new Set(b);
   return a.every((id) => bSet.has(id));
+}
+
+function exerciseRegionGroups(items = [], getRegion = (item) => item?.region) {
+  return REGIONS
+    .filter((region) => region.key !== "all")
+    .map((region) => ({
+      ...region,
+      items: items.filter((item) => getRegion(item) === region.key),
+    }))
+    .filter((region) => region.items.length > 0);
 }
 
 function progressSummaryLabel(progress) {
@@ -245,6 +259,7 @@ function ConfirmResetButton({ onConfirm, label, confirmTitle = "Reset to recomme
 function BaselineManagerPanel({ profile, onRedo, onReset }) {
   const [selectedIds, setSelectedIds] = useState([]);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+  const [openRegions, setOpenRegions] = useState(() => new Set(DEFAULT_OPEN_REGION_KEYS));
   const items = PROFILE_ASSESSMENT_EXERCISES
     .map((exerciseId) => ({
       exerciseId,
@@ -252,6 +267,7 @@ function BaselineManagerPanel({ profile, onRedo, onReset }) {
       profileExercise: profile?.exercises?.[exerciseId] ?? null,
     }))
     .filter((item) => item.exercise);
+  const regionGroups = exerciseRegionGroups(items, (item) => item.exercise.region);
   const selectedExistingIds = selectedIds.filter((id) => profile?.exercises?.[id]);
   const selectedMissingIds = selectedIds.filter((id) => !profile?.exercises?.[id]);
   const redoLabel = selectedIds.length > 0 && selectedMissingIds.length === selectedIds.length
@@ -263,6 +279,14 @@ function BaselineManagerPanel({ profile, onRedo, onReset }) {
     setSelectedIds((current) => current.includes(exerciseId)
       ? current.filter((id) => id !== exerciseId)
       : [...current, exerciseId]);
+  };
+  const toggleRegion = (regionKey) => {
+    setOpenRegions((current) => {
+      const next = new Set(current);
+      if (next.has(regionKey)) next.delete(regionKey);
+      else next.add(regionKey);
+      return next;
+    });
   };
   const resetSelected = () => {
     onReset?.(selectedExistingIds);
@@ -282,28 +306,49 @@ function BaselineManagerPanel({ profile, onRedo, onReset }) {
           <button onClick={() => setSelectedIds([])} className="rounded-full px-2.5 py-1 text-[11px] font-semibold" style={{ background: "rgba(244,239,230,0.06)", color: "#F4EFE6", border: "1px solid rgba(244,239,230,0.12)" }}>Clear</button>
         </div>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
-        {items.map(({ exerciseId, exercise, profileExercise }) => {
-          const selected = selectedIds.includes(exerciseId);
-          const quality = profileExercise?.quality;
-          const pct = displayPct(profileExercise?.initialSymmetry);
-          return (
-            <button key={exerciseId} onClick={() => toggleSelected(exerciseId)} aria-pressed={selected} className="text-left rounded-xl px-3 py-2.5 flex items-center gap-2" style={{ background: selected ? "rgba(184,84,58,0.24)" : "rgba(244,239,230,0.06)", border: selected ? "1px solid rgba(255,180,143,0.45)" : "1px solid rgba(244,239,230,0.08)", color: "#F4EFE6" }}>
-              <div className="w-5 h-5 rounded-full flex items-center justify-center shrink-0" style={{ background: selected ? "#B8543A" : "rgba(244,239,230,0.08)", border: selected ? "none" : "1px solid rgba(244,239,230,0.16)" }}>
-                {selected && <Check className="w-3 h-3" />}
+      <div className="max-h-72 overflow-y-auto pr-1 space-y-4">
+        {regionGroups.map((group) => (
+          <div key={group.key}>
+            <button
+              type="button"
+              onClick={() => toggleRegion(group.key)}
+              aria-expanded={openRegions.has(group.key)}
+              className="w-full flex items-center justify-between gap-3 mb-2 rounded-lg px-2 py-1.5 text-left"
+              style={{ background: "rgba(244,239,230,0.04)", color: "#F4EFE6" }}
+            >
+              <div className="inline-flex items-center gap-1.5 min-w-0">
+                <ChevronRight className="w-3.5 h-3.5 shrink-0 transition-transform" style={{ transform: openRegions.has(group.key) ? "rotate(90deg)" : "rotate(0deg)" }} />
+                <span className="text-[10px] uppercase tracking-wider opacity-65 truncate">{group.label}</span>
               </div>
-              <ExerciseGlyph exercise={exercise} size="xs" tone="dark" />
-              <div className="min-w-0 flex-1">
-                <div className="text-xs font-semibold truncate">{exercise.name}</div>
-                <div className="text-[10px] opacity-60 truncate">
-                  {profileExercise
-                    ? `${pct == null ? "Baseline saved" : `${pct}% baseline`}${quality?.label ? ` · ${quality.label}` : ""}`
-                    : "Needs baseline"}
-                </div>
-              </div>
+              <div className="text-[10px] tabular-nums opacity-45 shrink-0">{group.items.filter((item) => item.profileExercise).length}/{group.items.length}</div>
             </button>
-          );
-        })}
+            {openRegions.has(group.key) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {group.items.map(({ exerciseId, exercise, profileExercise }) => {
+                  const selected = selectedIds.includes(exerciseId);
+                  const quality = profileExercise?.quality;
+                  const pct = displayPct(profileExercise?.initialSymmetry);
+                  return (
+                    <button key={exerciseId} onClick={() => toggleSelected(exerciseId)} aria-pressed={selected} className="text-left rounded-xl px-3 py-2.5 flex items-center gap-2" style={{ background: selected ? "rgba(184,84,58,0.24)" : "rgba(244,239,230,0.06)", border: selected ? "1px solid rgba(255,180,143,0.45)" : "1px solid rgba(244,239,230,0.08)", color: "#F4EFE6" }}>
+                      <div className="w-5 h-5 rounded-full flex items-center justify-center shrink-0" style={{ background: selected ? "#B8543A" : "rgba(244,239,230,0.08)", border: selected ? "none" : "1px solid rgba(244,239,230,0.16)" }}>
+                        {selected && <Check className="w-3 h-3" />}
+                      </div>
+                      <ExerciseGlyph exercise={exercise} size="xs" tone="dark" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-semibold truncate">{exercise.name}</div>
+                        <div className="text-[10px] opacity-60 truncate">
+                          {profileExercise
+                            ? `${pct == null ? "Baseline saved" : `${pct}% baseline`}${quality?.label ? ` · ${quality.label}` : ""}`
+                            : "Needs baseline"}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
       <div className="flex flex-wrap gap-2 mt-3">
         <button disabled={!selectedIds.length} onClick={() => onRedo?.(selectedIds)} className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold disabled:opacity-40" style={{ background: "#B8543A", color: "#F4EFE6" }}>
@@ -1334,10 +1379,107 @@ function ExerciseDetail({ exercise, movementProfile, onClose, onStart }) {
   );
 }
 
+function cameraSetupState({ cameraEnabled = true, trackingEnabled = true, stream, cameraError, trackerStatus, trackerError, faceLandmarker }) {
+  if (!cameraEnabled) {
+    return {
+      key: "camera-off",
+      title: "Mirror camera is off",
+      body: "Turn on the mirror camera to use live tracking for this session.",
+      color: "#A8A29E",
+      icon: "off",
+      retryable: false,
+    };
+  }
+  if (!trackingEnabled) {
+    return {
+      key: "tracking-off",
+      title: "Symmetry tracking is off",
+      body: "This exercise will run without live camera scoring.",
+      color: "#A8A29E",
+      icon: "off",
+      retryable: false,
+    };
+  }
+  if (cameraError) {
+    return {
+      key: "camera-error",
+      title: "Camera needs attention",
+      body: cameraError,
+      color: "#D4A574",
+      icon: "alert",
+      retryable: true,
+    };
+  }
+  if (!stream) {
+    return {
+      key: "camera-starting",
+      title: "Starting camera",
+      body: "Allow camera access if your browser asks. Mirror needs the front camera before setup can continue.",
+      color: "#D4A574",
+      icon: "loading",
+      retryable: true,
+    };
+  }
+  if (trackerStatus === "error") {
+    return {
+      key: "tracker-error",
+      title: "Tracker unavailable",
+      body: trackerError || "The face tracking model could not start. Retry camera setup, or start unscored practice.",
+      color: "#D4A574",
+      icon: "alert",
+      retryable: true,
+    };
+  }
+  if (trackerStatus === "loading" || !faceLandmarker) {
+    return {
+      key: "tracker-loading",
+      title: "Loading symmetry tracker",
+      body: "Mirror is loading the local face model. Keep this tab open for a moment.",
+      color: "#D4A574",
+      icon: "loading",
+      retryable: false,
+    };
+  }
+  return null;
+}
+
+function CameraSetupStatusPanel({
+  cameraEnabled = true,
+  trackingEnabled = true,
+  stream,
+  cameraError,
+  trackerStatus,
+  trackerError,
+  faceLandmarker,
+  onRetry,
+  retryLabel = "Retry camera",
+  className = "",
+}) {
+  const state = cameraSetupState({ cameraEnabled, trackingEnabled, stream, cameraError, trackerStatus, trackerError, faceLandmarker });
+  if (!state) return null;
+  const Icon = state.icon === "loading" ? Loader2 : state.icon === "off" ? CameraOff : AlertCircle;
+  return (
+    <div className={`rounded-2xl p-3 text-left ${className}`} style={{ background: "rgba(244,239,230,0.08)", border: `1px solid ${state.color}55`, color: "#F4EFE6" }}>
+      <div className="flex items-start gap-2.5">
+        <Icon className={`w-4 h-4 mt-0.5 shrink-0 ${state.icon === "loading" ? "animate-spin" : ""}`} style={{ color: state.color }} />
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-semibold" style={{ color: state.color }}>{state.title}</div>
+          <div className="text-[11px] leading-relaxed opacity-75 mt-0.5">{state.body}</div>
+          {state.retryable && onRetry && (
+            <button onClick={onRetry} className="mt-2 inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold" style={{ background: `${state.color}22`, color: state.color, border: `1px solid ${state.color}55` }}>
+              <RotateCcw className="w-3 h-3" />{retryLabel}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TrackerStatusPill({ status, liveScore, phase, trackingIssue }) {
   let icon, label, color;
   if (status === "loading") { icon = <Loader2 className="w-3 h-3 animate-spin" />; label = "Loading symmetry tracker…"; color = "#D4A574"; }
-  else if (status === "error") { icon = <AlertCircle className="w-3 h-3" />; label = "Tracker unavailable — session continues without scoring"; color = "#A8A29E"; }
+  else if (status === "error") { icon = <AlertCircle className="w-3 h-3" />; label = "Tracker unavailable"; color = "#A8A29E"; }
   else if (status === "ready" && phase === "calibrate") {
     icon = <Loader2 className="w-3 h-3 animate-spin" />;
     label = "Calibrating neutral pose";
@@ -1417,9 +1559,10 @@ function BalanceBar({ label, frac, highlight, color }) {
   );
 }
 
-function PreviewView({ exercise, exIdx, totalExercises, onStart, onCancel, stream, faceLandmarker, mirrorEnabled, cameraError }) {
+function PreviewView({ exercise, exIdx, totalExercises, onStart, onCancel, stream, faceLandmarker, mirrorEnabled, cameraError, trackerStatus, trackerError, trackingEnabled = true, onRetryCameraSetup }) {
   if (!exercise) return null;
-  const useLivePreview = stream && faceLandmarker && !cameraError && mirrorEnabled;
+  const useLivePreview = trackingEnabled && stream && faceLandmarker && !cameraError && mirrorEnabled;
+  const startsUnscored = !useLivePreview && trackingEnabled && mirrorEnabled;
   return (
     <div className="fixed inset-0 z-50 flex items-stretch lg:items-center lg:justify-center lg:p-6" style={{ background: "rgba(12,10,8,0.92)" }}>
       <div className="flex flex-col w-full h-full lg:w-[440px] lg:h-[860px] lg:max-h-[92vh] lg:rounded-3xl lg:overflow-hidden lg:shadow-2xl" style={{ background: "#1F1B16", color: "#F4EFE6" }}>
@@ -1439,10 +1582,24 @@ function PreviewView({ exercise, exIdx, totalExercises, onStart, onCancel, strea
           {exercise.tip && (
             <div className="text-xs leading-relaxed opacity-60 max-w-xs mb-4" style={{ fontStyle: "italic" }}>{exercise.tip}</div>
           )}
+          {!useLivePreview && (
+            <CameraSetupStatusPanel
+              cameraEnabled={mirrorEnabled}
+              trackingEnabled={trackingEnabled}
+              stream={stream}
+              cameraError={cameraError}
+              trackerStatus={trackerStatus}
+              trackerError={trackerError}
+              faceLandmarker={faceLandmarker}
+              onRetry={onRetryCameraSetup}
+              retryLabel="Retry camera setup"
+              className="w-full max-w-xs mb-4"
+            />
+          )}
         </div>
         <div className="p-4 shrink-0" style={{ borderTop: "1px solid rgba(244,239,230,0.08)" }}>
           <button onClick={onStart} className="w-full rounded-full px-6 py-4 font-semibold flex items-center justify-center gap-2 text-base" style={{ background: "#B8543A", color: "#F4EFE6" }}>
-            I'm ready<ChevronRight className="w-4 h-4" />
+            {startsUnscored ? "Start unscored" : "I'm ready"}<ChevronRight className="w-4 h-4" />
           </button>
         </div>
       </div>
@@ -2035,13 +2192,54 @@ function PastAssessmentRow({ assessment, sourceSession, onOpen, showClinicalScal
 }
 
 function PastAssessmentsList({ assessments, sessions, onOpen, showClinicalScaleEstimates = true }) {
-  const sorted = [...(assessments ?? [])].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 12);
+  const [page, setPage] = useState(0);
+  const sorted = useMemo(() => [...(assessments ?? [])].sort((a, b) => (b.ts || 0) - (a.ts || 0)), [assessments]);
+  const pageCount = Math.ceil(sorted.length / PAST_ASSESSMENTS_PAGE_SIZE);
+  const lastPage = Math.max(0, pageCount - 1);
+  const currentPage = Math.min(page, lastPage);
+  const start = currentPage * PAST_ASSESSMENTS_PAGE_SIZE;
+  const visible = sorted.slice(start, start + PAST_ASSESSMENTS_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, Math.max(0, pageCount - 1)));
+  }, [pageCount]);
+
   if (!sorted.length) return null;
   return (
     <div className="rounded-2xl p-5" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
-      <div className="text-sm font-semibold mb-3">Past assessments</div>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-semibold">Past assessments</div>
+          {pageCount > 1 && (
+            <div className="text-xs text-stone-500 tabular-nums mt-0.5">{start + 1}-{Math.min(start + PAST_ASSESSMENTS_PAGE_SIZE, sorted.length)} of {sorted.length}</div>
+          )}
+        </div>
+        {pageCount > 1 && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => setPage((value) => Math.max(0, value - 1))}
+              disabled={currentPage === 0}
+              aria-label="Show newer assessments"
+              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+              style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div className="text-xs text-stone-500 tabular-nums px-1.5">{currentPage + 1}/{pageCount}</div>
+            <button
+              onClick={() => setPage((value) => Math.min(lastPage, value + 1))}
+              disabled={currentPage === lastPage}
+              aria-label="Show older assessments"
+              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+              style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+      </div>
       <div className="space-y-1.5">
-        {sorted.map((assessment) => {
+        {visible.map((assessment) => {
           const sourceSession = sourceSessionForAssessment(assessment, sessions);
           return <PastAssessmentRow key={assessment.sourceSessionId ?? assessment.sourceSessionTs ?? assessment.ts} assessment={assessment} sourceSession={sourceSession} onOpen={onOpen} showClinicalScaleEstimates={showClinicalScaleEstimates} />;
         })}
@@ -2090,12 +2288,22 @@ function TimelapseModal({ exercise, startIdx, onClose }) {
 function JournalView({ entries, onSave }) {
   const today = todayISO();
   const todayEntry = entries.find((e) => recordDateISO(e) === today);
+  const [page, setPage] = useState(0);
   const [symmetry, setSymmetry] = useState(todayEntry?.symmetry ?? 5);
   const [mood, setMood] = useState(todayEntry?.mood ?? "okay");
   const [notes, setNotes] = useState(todayEntry?.notes ?? "");
   const [saved, setSaved] = useState(false);
   const handleSave = () => { onSave({ date: today, symmetry, mood, notes, ts: Date.now() }); setSaved(true); setTimeout(() => setSaved(false), 2000); };
   const past = [...entries].filter((e) => recordDateISO(e) !== today).reverse();
+  const pageCount = Math.ceil(past.length / PAST_JOURNAL_PAGE_SIZE);
+  const lastPage = Math.max(0, pageCount - 1);
+  const currentPage = Math.min(page, lastPage);
+  const start = currentPage * PAST_JOURNAL_PAGE_SIZE;
+  const visiblePast = past.slice(start, start + PAST_JOURNAL_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, Math.max(0, pageCount - 1)));
+  }, [pageCount]);
 
   return (
     <div className="space-y-6">
@@ -2129,8 +2337,38 @@ function JournalView({ entries, onSave }) {
       <button onClick={handleSave} className="w-full rounded-full py-3 font-semibold" style={{ background: saved ? "#7A8F73" : "#1F1B16", color: "#F4EFE6" }}>{saved ? "✓ Saved" : todayEntry ? "Update entry" : "Save entry"}</button>
       {past.length > 0 && (
         <div>
-          <div className="text-sm uppercase tracking-wider text-stone-500 mb-3">Past entries</div>
-          <div className="space-y-2">{past.slice(0, 14).map((e) => <PastEntryRow key={e.date} entry={e} />)}</div>
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <div className="text-sm uppercase tracking-wider text-stone-500">Past entries</div>
+              {pageCount > 1 && (
+                <div className="text-xs text-stone-500 tabular-nums mt-0.5">{start + 1}-{Math.min(start + PAST_JOURNAL_PAGE_SIZE, past.length)} of {past.length}</div>
+              )}
+            </div>
+            {pageCount > 1 && (
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={() => setPage((value) => Math.max(0, value - 1))}
+                  disabled={currentPage === 0}
+                  aria-label="Show newer journal entries"
+                  className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+                  style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <div className="text-xs text-stone-500 tabular-nums px-1.5">{currentPage + 1}/{pageCount}</div>
+                <button
+                  onClick={() => setPage((value) => Math.min(lastPage, value + 1))}
+                  disabled={currentPage === lastPage}
+                  aria-label="Show older journal entries"
+                  className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-stone-600 disabled:opacity-35 disabled:pointer-events-none hover:bg-white"
+                  style={{ background: "rgba(255,255,255,0.45)", border: "1px solid rgba(31, 27, 22, 0.06)" }}
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="space-y-2">{visiblePast.map((e) => <PastEntryRow key={e.date} entry={e} />)}</div>
         </div>
       )}
     </div>
@@ -2220,7 +2458,9 @@ function PastEntryRow({ entry }) {
 
 function MovementProfileCard({ profile, initialProfile, history, sessions, progressByExercise, onStart, onReset }) {
   const exercises = profileExerciseEntries(profile);
+  const exerciseGroups = exerciseRegionGroups(exercises);
   const [managerOpen, setManagerOpen] = useState(false);
+  const [openRegions, setOpenRegions] = useState(() => new Set(DEFAULT_OPEN_REGION_KEYS));
   const focusItems = getAdaptiveFocusItems(profile, sessions, 3);
   const created = profile?.createdAt ? new Date(profile.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : null;
   const status = profileStatus(profile);
@@ -2247,6 +2487,14 @@ function MovementProfileCard({ profile, initialProfile, history, sessions, progr
       </div>
     );
   }
+  const toggleRegion = (regionKey) => {
+    setOpenRegions((current) => {
+      const next = new Set(current);
+      if (next.has(regionKey)) next.delete(regionKey);
+      else next.add(regionKey);
+      return next;
+    });
+  };
 
   return (
     <div className="rounded-2xl p-5" style={{ background: "rgba(31, 27, 22, 0.92)", color: "#F4EFE6" }}>
@@ -2351,22 +2599,43 @@ function MovementProfileCard({ profile, initialProfile, history, sessions, progr
           </div>
         </div>
       )}
-      <div className="space-y-2 mb-4">
-        {exercises.map((ex) => (
-          <div key={ex.exerciseId} className="flex items-center gap-3 text-xs">
-            <ExerciseGlyph exerciseId={ex.exerciseId} region={ex.region} size="xs" tone="dark" />
-            <div className="flex-1 min-w-0">
-              <div className="font-medium truncate">{ex.name}</div>
-              <div className="opacity-55">
-                limited side: {ex.limitedSide} · reliable {ex.thresholdBands?.reliableMovement ?? ex.activationThreshold ?? "—"} · target {ex.thresholdBands?.baselineTarget ?? "—"}
+      <div className="space-y-4 mb-4">
+        {exerciseGroups.map((group) => (
+          <div key={group.key}>
+            <button
+              type="button"
+              onClick={() => toggleRegion(group.key)}
+              aria-expanded={openRegions.has(group.key)}
+              className="w-full flex items-center justify-between gap-3 mb-2 rounded-lg px-2 py-1.5 text-left"
+              style={{ background: "rgba(244,239,230,0.04)", color: "#F4EFE6" }}
+            >
+              <div className="inline-flex items-center gap-1.5 min-w-0">
+                <ChevronRight className="w-3.5 h-3.5 shrink-0 transition-transform" style={{ transform: openRegions.has(group.key) ? "rotate(90deg)" : "rotate(0deg)" }} />
+                <span className="text-[10px] uppercase tracking-wider opacity-65 truncate">{group.label}</span>
               </div>
-              {ex.quality && <div className="opacity-55">quality: {ex.quality.label}{ex.quality.issues?.length ? ` · ${ex.quality.issues.join(", ")}` : ""}</div>}
-              {progressByExercise?.[ex.exerciseId] && <div className="mt-0.5" style={{ color: "#D4A574" }}>{progressSummaryLabel(progressByExercise[ex.exerciseId])}</div>}
-            </div>
-            {ex.quality?.key === "retake" && (
-              <button onClick={() => onStart([ex.exerciseId])} className="rounded-full px-2.5 py-1 text-[11px] font-semibold shrink-0" style={{ background: "rgba(184,84,58,0.2)", color: "#FFD3C1" }}>Retake</button>
+              <div className="text-[10px] tabular-nums opacity-45 shrink-0">{group.items.length} baseline{group.items.length === 1 ? "" : "s"}</div>
+            </button>
+            {openRegions.has(group.key) && (
+              <div className="space-y-2">
+                {group.items.map((ex) => (
+                  <div key={ex.exerciseId} className="flex items-center gap-3 text-xs">
+                    <ExerciseGlyph exerciseId={ex.exerciseId} region={ex.region} size="xs" tone="dark" />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{ex.name}</div>
+                      <div className="opacity-55">
+                        limited side: {ex.limitedSide} · reliable {ex.thresholdBands?.reliableMovement ?? ex.activationThreshold ?? "—"} · target {ex.thresholdBands?.baselineTarget ?? "—"}
+                      </div>
+                      {ex.quality && <div className="opacity-55">quality: {ex.quality.label}{ex.quality.issues?.length ? ` · ${ex.quality.issues.join(", ")}` : ""}</div>}
+                      {progressByExercise?.[ex.exerciseId] && <div className="mt-0.5" style={{ color: "#D4A574" }}>{progressSummaryLabel(progressByExercise[ex.exerciseId])}</div>}
+                    </div>
+                    {ex.quality?.key === "retake" && (
+                      <button onClick={() => onStart([ex.exerciseId])} className="rounded-full px-2.5 py-1 text-[11px] font-semibold shrink-0" style={{ background: "rgba(184,84,58,0.2)", color: "#FFD3C1" }}>Retake</button>
+                    )}
+                    {ex.initialSymmetry != null && <div className="tabular-nums shrink-0" style={{ color: scoreColor(ex.initialSymmetry) }}>{displayPct(ex.initialSymmetry)}%</div>}
+                  </div>
+                ))}
+              </div>
             )}
-            {ex.initialSymmetry != null && <div className="tabular-nums shrink-0" style={{ color: scoreColor(ex.initialSymmetry) }}>{displayPct(ex.initialSymmetry)}%</div>}
           </div>
         ))}
       </div>
@@ -2421,7 +2690,7 @@ function BaselineView({ data, onStartProfile, onResetBaselines }) {
   );
 }
 
-function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, onSetPref, onOpenReport, onDeleteSession, onExportData, onExportClinicianBundle, onExportValidationDataset, onImportData }) {
+function ProgressView({ data, streak, prefs, onOpenReport, onDeleteSession }) {
   // Progress charts are projections of journal/session history. Keeping them derived
   // avoids migration work when scoring or display rules change.
   const practiceSessions = useMemo(() => data.sessions.filter((session) => session.kind !== "assessment"), [data.sessions]);
@@ -2648,12 +2917,23 @@ function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, o
           </div>
         </div>
       )}
-      <BrowserDataControls status={dataTransferStatus} onExport={onExportData} onExportClinicianBundle={onExportClinicianBundle} onExportValidationDataset={onExportValidationDataset} onImport={onImportData} />
+    </div>
+  );
+}
+
+function PreferencesView({ prefs, sessionReminderStatus, onToggleSessionReminders, dataTransferStatus, onTogglePref, onSetPref, onExportData, onExportClinicianBundle, onExportValidationDataset, onImportData, storageUsage, onRefreshStorageUsage, onClearAllData }) {
+  const showClinicalScaleEstimates = prefs.clinicalScaleEstimatesEnabled !== false;
+  return (
+    <div className="space-y-6">
       <div>
-        <div className="text-sm uppercase tracking-wider text-stone-500 mb-3">Preferences</div>
+        <h2 className="text-3xl" style={{ fontFamily: "Fraunces", fontWeight: 500, letterSpacing: "-0.02em" }}>Preferences</h2>
+        <p className="text-sm text-stone-600 mt-1">Adjust routine cadence, scoring behavior, voice prompts, camera use, and local data.</p>
+      </div>
+      <div>
+        <div className="text-sm uppercase tracking-wider text-stone-500 mb-3">Practice settings</div>
         <div className="space-y-2">
           <DailyGoalSelector value={prefs.dailyGoal ?? 3} onChange={(v) => onSetPref("dailyGoal", v)} />
-          <ToggleRow label="Symmetry tracking" description="Auto-measure symmetry during exercises" value={prefs.symmetryEnabled} onToggle={() => onTogglePref("symmetryEnabled")} />
+          <SessionReminderToggle status={sessionReminderStatus} onToggle={onToggleSessionReminders} />
           <ToggleRow label="Personal recovery model" description="Train local trend estimates from your saved sessions" value={prefs.personalModelEnabled !== false} onToggle={() => onTogglePref("personalModelEnabled")} />
           <ToggleRow label="Scale-inspired estimates" description="Show optional HB-inspired, Sunnybrook-style, and eFACE-style self-tracking estimates after assessments" value={showClinicalScaleEstimates} onToggle={() => onTogglePref("clinicalScaleEstimatesEnabled")} />
           <ToggleRow label="Local data capture" description="Store sampled landmarks for debugging and future model work" value={prefs.dataCaptureEnabled === true} onToggle={() => onTogglePref("dataCaptureEnabled")} />
@@ -2663,6 +2943,7 @@ function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, o
           <ToggleRow label="Mirror camera" description="Front camera during sessions" value={prefs.mirrorEnabled} onToggle={() => onTogglePref("mirrorEnabled")} />
         </div>
       </div>
+      <BrowserDataControls status={dataTransferStatus} onExport={onExportData} onExportClinicianBundle={onExportClinicianBundle} onExportValidationDataset={onExportValidationDataset} onImport={onImportData} usage={storageUsage} onRefreshUsage={onRefreshStorageUsage} onClearAll={onClearAllData} />
       <div className="rounded-2xl p-4 text-xs text-stone-600 leading-relaxed" style={{ background: "rgba(122, 143, 115, 0.1)" }}>
         Mirror is a practice companion, not medical care. Always work with your neurologist and physical therapist on your specific recovery plan. Discontinue any exercise that causes pain.
       </div>
@@ -2670,9 +2951,80 @@ function ProgressView({ data, streak, prefs, dataTransferStatus, onTogglePref, o
   );
 }
 
-function BrowserDataControls({ status, onExport, onExportClinicianBundle, onExportValidationDataset, onImport }) {
+function sessionReminderDescription(status = {}) {
+  if (status.state === "unsupported") return "This browser does not support local notifications.";
+  if (status.state === "blocked") {
+    return status.enabled
+      ? "Browser notifications are blocked. Tap to turn off saved reminders, or allow notifications in browser settings."
+      : "Notifications are blocked for this site. Allow them in browser settings to use reminders.";
+  }
+  if (status.state === "requesting") return "Waiting for browser notification permission...";
+  if (status.state === "needs-permission") return "Allow browser notifications to turn on local session reminders.";
+  if (status.state === "scheduled") return `Browser-local reminder while Mirror is open. Next at ${status.nextLabel}.`;
+  if (status.state === "complete") return "Browser reminders are on. Today's session goal is complete.";
+  return "Notify this browser when the next scheduled session is due while Mirror is open.";
+}
+
+function sessionReminderStatusLabel(status = {}) {
+  if (status.state === "unsupported") return "Unsupported";
+  if (status.state === "blocked") return "Blocked";
+  if (status.state === "requesting") return "Asking";
+  if (status.state === "needs-permission") return "Allow";
+  if (status.state === "scheduled" || status.state === "complete") return "On";
+  return "Off";
+}
+
+function SessionReminderToggle({ status = {}, onToggle }) {
+  const savedEnabled = status.enabled === true;
+  const value = savedEnabled && status.permission === "granted";
+  const disabled = status.state === "requesting"
+    || (!savedEnabled && (status.state === "unsupported" || status.state === "blocked"));
+  return (
+    <ToggleRow
+      label="Session reminders"
+      description={sessionReminderDescription(status)}
+      statusLabel={sessionReminderStatusLabel(status)}
+      value={value}
+      disabled={disabled}
+      onToggle={onToggle}
+    />
+  );
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) { value /= 1024; unitIndex += 1; }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function StorageUsageCard({ usage, onRefresh }) {
+  useEffect(() => { onRefresh?.(); }, [onRefresh]);
+  const used = formatBytes(usage?.usage);
+  const quota = formatBytes(usage?.quota);
+  const counts = usage?.counts;
+  return (
+    <div className="rounded-2xl p-4 mb-3" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
+      <div className="text-sm font-medium mb-1">Storage used</div>
+      {used ? (
+        <div className="text-xs text-stone-500">
+          {used}{quota ? ` of ${quota}` : ""} on this device
+          {counts ? ` · ${counts.sessions} sessions · ${counts.images} photos · ${counts.frameArchives} capture sets` : ""}
+        </div>
+      ) : (
+        <div className="text-xs text-stone-500">Storage estimate unavailable in this browser.</div>
+      )}
+    </div>
+  );
+}
+
+function BrowserDataControls({ status, onExport, onExportClinicianBundle, onExportValidationDataset, onImport, usage, onRefreshUsage, onClearAll }) {
   const inputRef = useRef(null);
   const [pendingImportFile, setPendingImportFile] = useState(null);
+  const [pendingClear, setPendingClear] = useState(false);
   const busy = status?.kind === "working";
   const statusColor = status?.kind === "error" ? "#B8543A" : status?.kind === "success" ? "#7A8F73" : "#7C7066";
   const handleImportPick = (event) => {
@@ -2683,6 +3035,7 @@ function BrowserDataControls({ status, onExport, onExportClinicianBundle, onExpo
   return (
     <div>
       <div className="text-sm uppercase tracking-wider text-stone-500 mb-3">Browser data</div>
+      <StorageUsageCard usage={usage} onRefresh={onRefreshUsage} />
       <div className="rounded-2xl p-4" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
         <div className="text-sm font-medium mb-1">Local backup</div>
         <div className="text-xs text-stone-500 mb-4">Sessions, baselines, journal, preferences, report images, and local capture samples.</div>
@@ -2703,6 +3056,28 @@ function BrowserDataControls({ status, onExport, onExportClinicianBundle, onExpo
         </div>
         {status?.message && <div className="text-xs mt-3" style={{ color: statusColor }}>{status.message}</div>}
       </div>
+      {onClearAll && (
+        <div className="rounded-2xl p-4 mt-3" style={{ background: "rgba(184, 84, 58, 0.06)", border: "1px solid rgba(184, 84, 58, 0.16)" }}>
+          <div className="text-sm font-medium mb-1" style={{ color: "#8A3E2A" }}>Clear all local data</div>
+          <div className="text-xs text-stone-500 mb-3">Permanently removes every session, photo, capture sample, journal entry, and preference from this device. Export a backup first if you want to keep it.</div>
+          <button disabled={busy} onClick={() => setPendingClear(true)} className="inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-xs font-semibold disabled:opacity-45" style={{ background: "rgba(184, 84, 58, 0.14)", color: "#8A3E2A", border: "1px solid rgba(184, 84, 58, 0.28)" }}>
+            <Trash2 className="w-3.5 h-3.5" />Clear all data
+          </button>
+        </div>
+      )}
+      {pendingClear && (
+        <ConfirmAlert
+          title="Clear all local data?"
+          message="This permanently deletes every session, photo, capture sample, journal entry, and preference on this device. This cannot be undone. Export a backup first if you want to keep your data."
+          confirmLabel="Delete everything"
+          cancelLabel="Keep my data"
+          onConfirm={() => {
+            setPendingClear(false);
+            onClearAll?.();
+          }}
+          onCancel={() => setPendingClear(false)}
+        />
+      )}
       {pendingImportFile && (
         <ConfirmAlert
           title="Import browser data?"
@@ -2767,14 +3142,17 @@ function ScoringNoiseModeSelector({ value, onChange }) {
   );
 }
 
-function ToggleRow({ label, description, value, onToggle }) {
+function ToggleRow({ label, description, value, onToggle, disabled = false, statusLabel = null }) {
   return (
-    <button onClick={onToggle} className="w-full rounded-2xl p-4 flex items-center justify-between text-left" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
-      <div>
-        <div className="text-sm font-medium">{label}</div>
+    <button disabled={disabled} onClick={onToggle} className="w-full rounded-2xl p-4 flex items-center justify-between text-left disabled:cursor-not-allowed disabled:opacity-60" style={{ background: "rgba(255, 255, 255, 0.5)", border: "1px solid rgba(31, 27, 22, 0.06)" }}>
+      <div className="min-w-0 pr-4">
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-medium">{label}</div>
+          {statusLabel && <div className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider" style={{ background: "rgba(31,27,22,0.07)", color: "#7C7066" }}>{statusLabel}</div>}
+        </div>
         <div className="text-xs text-stone-500 mt-0.5">{description}</div>
       </div>
-      <div className="w-11 h-6 rounded-full p-0.5" style={{ background: value ? "#B8543A" : "rgba(31, 27, 22, 0.15)" }}>
+      <div className="w-11 h-6 rounded-full p-0.5 shrink-0" style={{ background: value ? "#B8543A" : "rgba(31, 27, 22, 0.15)" }}>
         <div className="w-5 h-5 rounded-full bg-white" style={{ transform: value ? "translateX(20px)" : "translateX(0)", transition: "transform 0.15s" }} />
       </div>
     </button>
@@ -2791,7 +3169,7 @@ function BottomNav({ view, setView }) {
           return (
             <button key={item.key} onClick={() => setView(item.key)} className="flex-1 flex flex-col items-center gap-0.5 py-2 rounded-full" style={{ background: active ? "#F4EFE6" : "transparent", color: active ? "#1F1B16" : "rgba(244, 239, 230, 0.65)" }}>
               <Icon className="w-4 h-4" strokeWidth={2.2} />
-              <span className="text-[10px] font-semibold">{item.label}</span>
+              <span className="text-[10px] font-semibold">{item.shortLabel ?? item.label}</span>
             </button>
           );
         })}
@@ -2862,7 +3240,7 @@ const ONBOARDING_STEPS = [
     title: "How many sessions a day?",
     body: "Retraining works best with frequent short sessions spread across the day.",
     accent: "#D4A574",
-    helper: "You can change this anytime in Progress → Preferences.",
+    helper: "You can change this anytime in Preferences.",
   },
   {
     type: "points",
@@ -3116,6 +3494,7 @@ function Onboarding({ onDone, dailyGoal, onSetDailyGoal, voiceEnabled, onToggleV
 export {
   BottomNav,
   BaselineView,
+  CameraSetupStatusPanel,
   ExerciseAnimation,
   ExerciseDetail,
   ExerciseGlyph,
@@ -3128,6 +3507,7 @@ export {
   Onboarding,
   PracticeView,
   PreviewView,
+  PreferencesView,
   ProgressView,
   RealtimeFeedback,
   SessionSummary,

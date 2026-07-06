@@ -17,12 +17,13 @@ import {
   recordDateISO,
   todayISO,
 } from "./domain/session";
-import { compactAppDataForStorage, createMirrorBrowserDataExportBlob, deleteSessionFrameSamples, deleteSessionImages, exportMirrorBrowserData, hydrateSessionImages, importMirrorBrowserData, loadMirrorData, parseMirrorBrowserDataFile, saveMirrorData } from "./storage";
+import { clearAllMirrorData, compactAppDataForStorage, createMirrorBrowserDataExportBlob, deleteSessionFrameSamples, deleteSessionImages, estimateStorageUsage, exportMirrorBrowserData, hydrateSessionImages, importMirrorBrowserData, loadMirrorData, parseMirrorBrowserDataFile, saveMirrorData } from "./storage";
 import { buildPersonalizedDailyPlan, orderExerciseIdsByRegion } from "./ml/faceMetrics";
 import { primeSpeech } from "./lib/speech";
 import { SessionMode } from "./session/SessionMode";
 import { ProfileAssessment } from "./profile/ProfileAssessment";
 import { TrialMode } from "./trial/TrialMode";
+import { useSessionReminders } from "./hooks/useSessionReminders";
 import { MadeByFooter } from "./components/MadeByFooter";
 import {
   BaselineView,
@@ -34,6 +35,7 @@ import {
   JournalView,
   Onboarding,
   PracticeView,
+  PreferencesView,
   ProgressView,
   SessionSummary,
   Sidebar,
@@ -74,6 +76,7 @@ export default function App() {
   const [viewingReport, setViewingReport] = useState(null);
   const [journalPrompt, setJournalPrompt] = useState(null);
   const [dataTransferStatus, setDataTransferStatus] = useState(null);
+  const [storageUsage, setStorageUsage] = useState(null);
   const dataRef = useRef(DEFAULT_DATA);
   const persistQueueRef = useRef(Promise.resolve());
   const persistSeqRef = useRef(0);
@@ -238,10 +241,12 @@ export default function App() {
   }, [data, persist]);
   const saveJournal = (entry) => { const filtered = data.journal.filter((j) => j.date !== entry.date); persist({ ...data, journal: [...filtered, entry].sort((a, b) => a.date.localeCompare(b.date)) }); };
   const togglePref = (key) => {
+    if (key === "symmetryEnabled") return;
     const next = { ...data, prefs: { ...data.prefs, [key]: !data.prefs[key] } };
     persist(key === "personalModelEnabled" ? withPersonalRecoveryModel(next) : next);
   };
   const setPref = (key, value) => {
+    if (key === "symmetryEnabled") return;
     const next = { ...data, prefs: { ...data.prefs, [key]: value } };
     persist(key === "personalModelEnabled" ? withPersonalRecoveryModel(next) : next);
   };
@@ -372,6 +377,62 @@ export default function App() {
     }
   }, []);
 
+  const refreshStorageUsage = useCallback(async () => {
+    try {
+      setStorageUsage(await estimateStorageUsage());
+    } catch (error) {
+      console.error("Failed to estimate storage usage", error);
+      setStorageUsage(null);
+    }
+  }, []);
+  const clearAllData = useCallback(async () => {
+    setDataTransferStatus({ kind: "working", message: "Clearing local data..." });
+    try {
+      await persistQueueRef.current.catch(() => {});
+      await clearAllMirrorData();
+      const fresh = withPersonalRecoveryModel(normalizeAppData({ prefs: { onboarded: true } }));
+      persistSeqRef.current += 1;
+      dataRef.current = fresh;
+      setData(fresh);
+      setSession(null);
+      setProfileAssessment(null);
+      setExerciseDetail(null);
+      setViewingReport(null);
+      setJournalPrompt(null);
+      setDataTransferStatus({ kind: "success", message: "Local data cleared." });
+      refreshStorageUsage();
+    } catch (error) {
+      console.error("Failed to clear local data", error);
+      setDataTransferStatus({ kind: "error", message: "Could not clear local data." });
+    }
+  }, [refreshStorageUsage]);
+
+  const openTodayFromReminder = useCallback(() => {
+    if (typeof window !== "undefined" && window.location.pathname !== "/") {
+      window.history.pushState({}, "", "/");
+      setPathname("/");
+    }
+    setView("home");
+  }, []);
+
+  const sessionReminders = useSessionReminders({
+    sessions: data.sessions,
+    dailyGoal: data.prefs.dailyGoal ?? 3,
+    enabled: !loading && pathname !== "/try" && data.prefs.sessionRemindersEnabled === true,
+    sessionActive: Boolean(session),
+    onReminderClick: openTodayFromReminder,
+  });
+
+  const toggleSessionReminders = async () => {
+    const savedEnabled = dataRef.current.prefs.sessionRemindersEnabled === true;
+    if (savedEnabled && sessionReminders.status.permission !== "default") {
+      setPref("sessionRemindersEnabled", false);
+      return;
+    }
+    const permission = await sessionReminders.requestPermission();
+    setPref("sessionRemindersEnabled", permission === "granted");
+  };
+
   if (pathname === "/try") return <TrialMode prefs={data.prefs} />;
   if (loading) return <div className="min-h-screen flex items-center justify-center" style={{ background: "#F4EFE6" }}><div className="text-stone-600">Loading…</div></div>;
 
@@ -389,7 +450,8 @@ export default function App() {
           {view === "practice" && <PracticeView movementProfile={data.movementProfile} sessions={data.sessions} personalizedPlanIds={personalizedPlanIds} recommendedPlanIds={recommendedPlanIds} savedRepeatCounts={data.prefs.personalPlan?.repeatCounts} savedRepCounts={data.prefs.personalPlan?.repCounts} onStartSession={startSession} onShowDetail={setExerciseDetail} onSavePersonalPlan={savePersonalPlan} onResetPersonalPlan={resetPersonalPlan} />}
           {view === "baseline" && <BaselineView data={data} onStartProfile={openProfileAssessment} onResetBaselines={resetMovementBaselines} />}
           {view === "journal" && <JournalView entries={data.journal} onSave={saveJournal} />}
-          {view === "progress" && <ProgressView data={data} streak={streak} prefs={data.prefs} dataTransferStatus={dataTransferStatus} onTogglePref={togglePref} onSetPref={setPref} onOpenReport={openStoredReport} onDeleteSession={deleteSession} onExportData={exportBrowserData} onExportClinicianBundle={exportClinicianBundle} onExportValidationDataset={exportValidationDataset} onImportData={importBrowserData} />}
+          {view === "progress" && <ProgressView data={data} streak={streak} prefs={data.prefs} onOpenReport={openStoredReport} onDeleteSession={deleteSession} />}
+          {view === "preferences" && <PreferencesView prefs={data.prefs} sessionReminderStatus={sessionReminders.status} onToggleSessionReminders={toggleSessionReminders} dataTransferStatus={dataTransferStatus} onTogglePref={togglePref} onSetPref={setPref} onExportData={exportBrowserData} onExportClinicianBundle={exportClinicianBundle} onExportValidationDataset={exportValidationDataset} onImportData={importBrowserData} storageUsage={storageUsage} onRefreshStorageUsage={refreshStorageUsage} onClearAllData={clearAllData} />}
         </main>
         <footer className="mt-10 text-center text-xs text-stone-500">
           <MadeByFooter />
