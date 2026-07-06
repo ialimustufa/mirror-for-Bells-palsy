@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export function useCameraStream(enabled) {
+export function useCameraStream(enabled, retryKey = 0) {
   const [stream, setStream] = useState(null);
   const [cameraError, setCameraError] = useState(null);
   const streamRef = useRef(null);
@@ -21,7 +21,14 @@ export function useCameraStream(enabled) {
     }
 
     let active = true;
-    navigator.mediaDevices?.getUserMedia({ video: { facingMode: "user" }, audio: false })
+    stopStream();
+    setCameraError(null);
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError("Camera access is not available in this browser.");
+      return () => { active = false; };
+    }
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false })
       .then((nextStream) => {
         if (!active) {
           nextStream.getTracks().forEach((track) => track.stop());
@@ -37,7 +44,7 @@ export function useCameraStream(enabled) {
       });
 
     return () => { active = false; };
-  }, [enabled, stopStream]);
+  }, [enabled, retryKey, stopStream]);
 
   useEffect(() => stopStream, [stopStream]);
 
